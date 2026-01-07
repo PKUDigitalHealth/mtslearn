@@ -129,13 +129,15 @@ model.evaluate(X_test, y_test)
 
 ```
 
+For a more complete workflow demonstration, please refer to our user demo notebook: [test.ipynb](test.ipynb): This notebook demonstrates the complete workflow of static and time series processes using a sample dataset containing 375 patients.
+
 ## **Documentation**
 
-For detailed documentation, including advanced usage, customization options, and examples, refer to the [User Guide](./User Guide.md).
+For detailed documentation, including advanced usage, customization options, and examples, refer to the [User Guide](User%20Guide.md) .
 
 ## **License**
 
-This project is licensed under the MIT License. See the [LICENSE](mtslearn-dev/LICENSE) file for details.
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
 ## Contact
 
