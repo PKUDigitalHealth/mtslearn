@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+from sklearn.preprocessing import StandardScaler
 
 
 class Processor:
@@ -57,7 +58,7 @@ class Processor:
 
         if label_col:
             # Map a single ground truth label to each unique ID
-            self.y = self.wide_df.groupby(id_col)[label_col].first().values
+            self.y = self.wide_df.groupby(id_col)[label_col].first()
 
     def export(self, export_path):
         """
@@ -143,52 +144,85 @@ class TSProcessor(Processor):
         self.wide_df = pd.concat(resampled_groups, ignore_index=True)
         return self.wide_df
 
-    def train_test_split(self, test_size=0.2, shuffle=True, random_state=None):
-        # 1. 排序确保时序正确
+    def train_test_split(self, test_size=0.2, shuffle=True, random_state=None, standardize=True):
+        """
+        Splits data into 3D tensors by unique IDs for sequence modeling.
+        
+        Parameters:
+        - test_size (float): Fraction of IDs for testing.
+        - shuffle (bool): Whether to randomize ID order.
+        - random_state (int): Seed for reproducibility.
+        - standardize (bool): Scale features based on training set statistics.
+
+        Returns:
+        - X_train, X_test (np.ndarray): 3D Tensors [Samples, TimeSteps, Features].
+        - y_train, y_test (np.ndarray): Corresponding labels.
+        """
+        # --- 1. Feature Engineering & Sorting ---
+        # Sort by ID and Time to ensure time_delta calculation is chronologically correct
         df_sorted = self.wide_df.sort_values([self.id_col, self.time_col])
+        # Diff within groups to prevent time gaps leaking between different IDs
+        df_sorted['time_delta'] = df_sorted.groupby(self.id_col)[self.time_col].diff().dt.total_seconds().fillna(0)
 
-        # 2. 计算步间时间间隔 (Time Delta)，第一个点填 0
-        temp_df = df_sorted.copy()
-        temp_df['time_delta'] = temp_df.groupby(self.id_col)[self.time_col].diff().dt.total_seconds().fillna(0)
-
-        # 记录时间列所在的索引位置（最后一列）
         current_features = self.features + ['time_delta']
         self.time_index = len(current_features) - 1
 
-        # 3. 分组并转换为 3D Tensor
-        groups = [group[current_features].values for _, group in temp_df.groupby(self.id_col, sort=False)]
-        n_samples = len(groups)
-        max_steps = max(len(g) for g in groups)
-        n_features = len(current_features)
+        # --- 2. ID-based Split ---
+        unique_ids = df_sorted[self.id_col].unique()
+        n_test = int(len(unique_ids) * test_size)
 
-        X_3d = np.zeros((n_samples, max_steps, n_features))
-        for i, g in enumerate(groups):
-            X_3d[i, :len(g), :] = g
-
-        # 4. 划分数据集
-        n_test = int(n_samples * test_size)
-        indices = np.arange(n_samples)
         if shuffle:
             if random_state is not None:
                 np.random.seed(random_state)
-            np.random.shuffle(indices)
+            np.random.shuffle(unique_ids)
 
-        test_idx, train_idx = indices[:n_test], indices[n_test:]
-        X_train, X_test = X_3d[train_idx], X_3d[test_idx]
-        y_train, y_test = self.y[train_idx], self.y[test_idx]
+        test_ids = unique_ids[:n_test]
+        train_ids = unique_ids[n_test:]
+
+        # --- 3. Standardization (Train-fit, Global-transform) ---
+        if standardize:
+            scaler = StandardScaler()
+            # Fit only on training set to avoid data leakage (look-ahead bias)
+            train_mask = df_sorted[self.id_col].isin(train_ids)
+            scaler.fit(df_sorted.loc[train_mask, current_features])
+            df_sorted[current_features] = scaler.transform(df_sorted[current_features])
+            self.scaler = scaler
+
+        # --- 4. 3D Tensor Construction ---
+        max_steps = df_sorted.groupby(self.id_col).size().max()
+        n_features = len(current_features)
+
+        def build_tensor(id_list):
+            tensor = np.zeros((len(id_list), max_steps, n_features))
+            # Dictionary mapping avoids repeated O(N) filtering in the loop
+            grouped = dict(list(df_sorted.groupby(self.id_col)))
+            for i, _id in enumerate(id_list):
+                group_data = grouped[_id][current_features].values
+                # Zero-padding for sequences shorter than max_steps
+                tensor[i, :len(group_data), :] = group_data
+            return tensor
+
+        X_train = build_tensor(train_ids)
+        X_test = build_tensor(test_ids)
+
+        # --- 5. Label Alignment ---
+        # Ensure label order strictly matches the shuffled X tensor order
+        y_train = self.y.loc[train_ids].values
+        y_test = self.y.loc[test_ids].values
 
         return X_train, X_test, y_train, y_test
 
 
 class StaticProcessor(Processor):
 
-    def extract_features(self, agg_funcs=['mean', 'std', 'max', 'min']):
+    def extract_features(self, agg_funcs=['mean', 'std', 'max', 'min'], include_duration=False):
         """
         Aggregate time-series data into static statistical features for each unique ID.
         Flattens temporal variance into a single row per instance.
 
         Parameters:
         - agg_funcs (list): List of aggregation strings (e.g., 'mean', 'std', 'max', 'min', 'skew').
+        - include_duration (bool): Whether to include the time duration (max - min) as a feature.
 
         Returns:
         - wide_df (pd.DataFrame): Aggregated DataFrame with flattened feature columns.
@@ -198,6 +232,12 @@ class StaticProcessor(Processor):
 
         # Flatten MultiIndex columns into 'Feature_Function' naming convention
         agg_df.columns = [f"{col}_{func}" for col, func in agg_df.columns]
+
+        # Calculate duration if requested (Difference between max and min timestamp)
+        if include_duration:
+            duration = self.wide_df.groupby(self.id_col)[self.time_col].agg(lambda x: x.max() - x.min())
+            agg_df['duration'] = duration.dt.total_seconds()
+
         self.features = list(agg_df.columns)
 
         # Synchronize labels by taking the first observation per ID group
@@ -244,7 +284,7 @@ class StaticProcessor(Processor):
         self.wide_df = df
         return self.wide_df
 
-    def train_test_split(self, test_size=0.2, shuffle=True, random_state=None):
+    def train_test_split(self, test_size=0.2, shuffle=True, random_state=None, standardize=True):
         """
         Shuffle and partition the static feature matrix into training and testing sets.
         Converts tabular data into 2D NumPy arrays for model ingestion.
@@ -253,6 +293,7 @@ class StaticProcessor(Processor):
         - test_size (float): Fraction of data for the test subset.
         - shuffle (bool): Whether to randomize sample order.
         - random_state (int): Seed for reproducibility.
+        - standardize (bool): Whether to scale features to zero mean and unit variance.
 
         Returns:
         - X_train, X_test, y_train, y_test: Partitioned feature matrices and labels.
@@ -274,4 +315,20 @@ class StaticProcessor(Processor):
         test_idx = indices[:n_test]
         train_idx = indices[n_test:]
 
-        return X[train_idx], X[test_idx], y[train_idx], y[test_idx]
+        # Extract partitioned data
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+
+        # Standardize features if requested
+        if standardize:
+            from sklearn.preprocessing import StandardScaler
+            self.scaler_2d = StandardScaler()
+
+            # Fit only on the training set to prevent data leakage
+            self.scaler_2d.fit(X_train)
+
+            # Transform both training and testing sets
+            X_train = self.scaler_2d.transform(X_train)
+            X_test = self.scaler_2d.transform(X_test)
+
+        return X_train, X_test, y_train, y_test
