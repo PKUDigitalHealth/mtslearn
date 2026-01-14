@@ -13,7 +13,7 @@ class Processor:
         self.label_col = None
         self.features = []
 
-    def read_file(self, num_type, file_path, time_col, id_col, label_col=None, value_col=None, attr_col=None, data_type='long'):
+    def read_file(self, num_class, file_path, time_col, id_col, label_col=None, value_col=None, attr_col=None, data_type='long'):
         """
         Read data from Excel and convert long-format data to wide-format.
 
@@ -29,7 +29,7 @@ class Processor:
         self.id_col = id_col
         self.time_col = time_col
         self.label_col = label_col
-        self.num_type = num_type
+        self.num_class = num_class
 
         if file_path.endswith('.csv') or file_path.endswith('.txt'):
             df = pd.read_csv(file_path)
@@ -323,7 +323,6 @@ class StaticProcessor(Processor):
 
         # Standardize features if requested
         if standardize:
-            from sklearn.preprocessing import StandardScaler
             self.scaler_2d = StandardScaler()
 
             # Fit only on the training set to prevent data leakage

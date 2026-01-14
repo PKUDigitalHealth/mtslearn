@@ -1,5 +1,4 @@
-from .TSClassifier import TSClassifier
-from .StaticClassifier import StaticClassifier
+from .Classifier import StaticClassifier, TSClassifier
 from .Processor import TSProcessor, StaticProcessor
 
 __version__ = "0.1.0"
