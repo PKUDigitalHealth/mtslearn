@@ -3,6 +3,8 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay, roc_curve, auc
 from sklearn.preprocessing import label_binarize
 from .utils import LSTM, TLSTM, XGB
+from sklearn.model_selection import KFold
+from sklearn.metrics import roc_auc_score, accuracy_score
 
 
 class Classifier:
@@ -55,7 +57,7 @@ class Classifier:
         - class_names (list of str, optional): Human-readable labels for categories.
         """
         y_pred, y_probs = self.predict(X_test)
-        num_classes = y_probs.shape[1]
+        num_classes = 2
 
         print(f"\n--- {self.model_type} Classification Report ---")
         print(classification_report(y_test, y_pred, target_names=class_names))
@@ -113,13 +115,13 @@ class Classifier:
             # Binary classification uses the probability of the positive class (index 1)
             fpr, tpr, _ = roc_curve(y_true, y_probs[:, 1])
             roc_auc = auc(fpr, tpr)
-            plt.plot(fpr, tpr, label=f'ROC curve (area = {roc_auc:.2f})')
+            plt.plot(fpr, tpr, label=f'ROC curve (area = {roc_auc:.4f})')
         else:
             # Multi-class: iterate through each class for individual ROC curves
             for i in range(num_classes):
                 fpr, tpr, _ = roc_curve(y_true_bin[:, i], y_probs[:, i])
                 roc_auc = auc(fpr, tpr)
-                plt.plot(fpr, tpr, label=f'Class {i} (area = {roc_auc:.2f})')
+                plt.plot(fpr, tpr, label=f'Class {i} (area = {roc_auc:.4f})')
 
         plt.plot([0, 1], [0, 1], 'k--')  # Diagonal reference line for random guessing
         plt.xlim([0.0, 1.0])

@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import os
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
 
 
 class Processor:
@@ -13,7 +14,7 @@ class Processor:
         self.label_col = None
         self.features = []
 
-    def read_file(self, num_class, file_path, time_col, id_col, label_col=None, value_col=None, attr_col=None, data_type='long'):
+    def read_file(self, file_path, time_col, id_col, label_col=None, value_col=None, attr_col=None, data_type='long'):
         """
         Read data from Excel and convert long-format data to wide-format.
 
@@ -29,14 +30,11 @@ class Processor:
         self.id_col = id_col
         self.time_col = time_col
         self.label_col = label_col
-        self.num_class = num_class
 
         if file_path.endswith('.csv') or file_path.endswith('.txt'):
             df = pd.read_csv(file_path)
         else:
             df = pd.read_excel(file_path)
-
-        df[time_col] = pd.to_datetime(df[time_col])
 
         if data_type == 'long':
             # Transform multiple rows of metrics into a single row per ID and timestamp
@@ -44,11 +42,50 @@ class Processor:
             if label_col:
                 pivot_idx.append(label_col)
             self.wide_df = df.pivot_table(index=pivot_idx, columns=attr_col, values=value_col).reset_index()
+
+        elif data_type == 'flattened':
+            # 1. Determine ID and Label
+            self.id_col = df.columns[0]
+            self.label_col = df.columns[-1]
+
+            # 2. Obtain intermediate observation pairs (Attr_n, Time_n)
+            obs_cols = df.columns[1:-1]
+
+            # 3. Flattened data
+            rows = []
+            for _, row in df.iterrows():
+                for i in range(0, len(obs_cols), 2):
+                    # Get feature names (from column names, such as "Attr 1"）
+                    attr_name = obs_cols[i]
+                    attr_val = row[obs_cols[i]]
+                    time_val = row[obs_cols[i + 1]]
+
+                    if pd.notna(attr_val) and pd.notna(time_val):
+                        rows.append({
+                            self.id_col: row[self.id_col],
+                            self.label_col: row[self.label_col],
+                            self.time_col: time_val,
+                            "__attr_name__": attr_name,
+                            "__value__": attr_val
+                        })
+
+            # 4. Core transformation: Expanding different Attrs into independent feature columns using pivot.
+            temp_df = pd.DataFrame(rows)
+            temp_df[self.time_col] = pd.to_datetime(temp_df[self.time_col])
+
+            # Convert to Wide Format: ID + Time + Label + Various Attributes
+            self.wide_df = temp_df.pivot_table(
+                index=[self.id_col, self.time_col, self.label_col], columns="__attr_name__", values="__value__"
+            ).reset_index()
+
+            # Clean up column name hierarchy
+            self.wide_df.columns.name = None
         else:
             self.wide_df = df
+        self.wide_df[time_col] = pd.to_datetime(self.wide_df[time_col])
 
         # Identify feature columns by excluding metadata columns
-        exclude = [id_col, time_col, label_col]
+        exclude = [self.id_col, self.time_col, self.label_col]
         self.features = [c for c in self.wide_df.columns if c not in exclude]
 
         # Convert time information into floating-point numbers
@@ -57,9 +94,9 @@ class Processor:
             if col != self.time_col:
                 self.wide_df[col] = self.wide_df[col].astype(np.int64) // 10**9
 
-        if label_col:
+        if self.label_col:
             # Map a single ground truth label to each unique ID
-            self.y = self.wide_df.groupby(id_col)[label_col].first()
+            self.y = self.wide_df.groupby(self.id_col)[self.label_col].first()
 
     def export(self, export_path):
         """
@@ -171,15 +208,19 @@ class TSProcessor(Processor):
 
         # --- 2. ID-based Split ---
         unique_ids = df_sorted[self.id_col].unique()
-        n_test = int(len(unique_ids) * test_size)
+        # Slice indices based on the calculated split ratio
+        if isinstance(test_size, float):
+            n_test = int(len(unique_ids) * test_size)
+        else:
+            n_test = test_size
 
         if shuffle:
             if random_state is not None:
                 np.random.seed(random_state)
             np.random.shuffle(unique_ids)
 
-        test_ids = unique_ids[:n_test]
-        train_ids = unique_ids[n_test:]
+        test_ids = unique_ids[-n_test:]
+        train_ids = unique_ids[:-n_test]
 
         # --- 3. Standardization (Train-fit, Global-transform) ---
         if standardize:
@@ -246,7 +287,7 @@ class StaticProcessor(Processor):
         if self.label_col:
             labels = self.wide_df.groupby(self.id_col)[self.label_col].first()
             self.wide_df = pd.concat([agg_df, labels], axis=1).reset_index()
-            self.y = self.wide_df[self.label_col].values
+            self.y = self.wide_df[self.label_col]
         else:
             self.wide_df = agg_df.reset_index()
 
@@ -280,56 +321,42 @@ class StaticProcessor(Processor):
                 df.loc[(df[col] - mean).abs() > 3 * std, col] = np.nan
 
         # Fill missing values using the specified global aggregator on the cleaned columns
-        fill_values = getattr(df[cols], fill_missing)()
+        if isinstance(fill_missing, (int, float)):
+            fill_values = fill_missing
+        else:
+            fill_values = getattr(df[cols], fill_missing)()
         df[cols] = df[cols].fillna(fill_values)
 
         self.wide_df = df
         return self.wide_df
 
-    def train_test_split(self, test_size=0.2, shuffle=True, random_state=None, standardize=True):
+    def train_test_split(self, test_size=0.2, shuffle=True, random_state=None, standardize=True, stratify=False):
         """
         Shuffle and partition the static feature matrix into training and testing sets.
         Converts tabular data into 2D NumPy arrays for model ingestion.
 
         Parameters:
-        - test_size (float): Fraction of data for the test subset.
+        - test_size (float/int): Fraction or absolute number of samples for testing.
         - shuffle (bool): Whether to randomize sample order.
         - random_state (int): Seed for reproducibility.
         - standardize (bool): Whether to scale features to zero mean and unit variance.
+        - stratify (bool): Whether to use stratified sampling based on labels.
 
         Returns:
         - X_train, X_test, y_train, y_test: Partitioned feature matrices and labels.
         """
         X = self.wide_df[self.features].values
-        y = self.y
+        y = self.y.values
 
-        n_samples = len(X)
-        indices = np.arange(n_samples)
+        stratify_param = y if (stratify and shuffle) else None
 
-        # Perform index-based shuffling to maintain X-y alignment
-        if shuffle:
-            if random_state is not None:
-                np.random.seed(random_state)
-            np.random.shuffle(indices)
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=test_size, random_state=random_state, shuffle=shuffle, stratify=stratify_param
+        )
 
-        # Slice indices based on the calculated split ratio
-        n_test = int(n_samples * test_size)
-        test_idx = indices[:n_test]
-        train_idx = indices[n_test:]
-
-        # Extract partitioned data
-        X_train, X_test = X[train_idx], X[test_idx]
-        y_train, y_test = y[train_idx], y[test_idx]
-
-        # Standardize features if requested
         if standardize:
             self.scaler_2d = StandardScaler()
-
-            # Fit only on the training set to prevent data leakage
-            self.scaler_2d.fit(X_train)
-
-            # Transform both training and testing sets
-            X_train = self.scaler_2d.transform(X_train)
+            X_train = self.scaler_2d.fit_transform(X_train)
             X_test = self.scaler_2d.transform(X_test)
 
         return X_train, X_test, y_train, y_test
