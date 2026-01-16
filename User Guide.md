@@ -2,7 +2,7 @@
 
 ## 1. Data Ingestion: The Processor Base Class
 
-The `Processor` class is an abstract base class designed to define the standard protocol for data loading and format conversion. It is not intended to be instantiated directly but provides the core `read_file` logic for its subclasses, `StaticProcessor` and `TSProcessor`.
+The `Processor` class is an abstract base class designed to define the standard protocol for data loading and format conversion. It provides the core `read_file` logic for its subclasses, `StaticProcessor` and `TSProcessor`.
 
 ### `Processor.read_file`
 
@@ -16,10 +16,8 @@ This function loads raw data from CSV or Excel files and transforms it into a st
     * **Long Format**: Uses `pivot_table` to expand multiple rows of measurements into columns based on `id_col` and `time_col`.
     * **Flattened Format**: Parses pairs of `(Attribute, Time)` columns, stacks them, and reshapes them into a feature-oriented wide table.
 
-
 * **Handling of Invariant Variables**: Variables that do not change over time (e.g., gender, race) are treated as constant time-series variables, with their values replicated across all timestamps for that ID.
 * **Timestamp Normalization**: All time data is converted into Unix Epoch seconds (float), enabling numerical calculations for time intervals in downstream modules.
-* **Label Alignment**: If a `label_col` is provided, the function performs a `groupby(id_col)` and selects the first available label to serve as the ground truth for that specific entity.
 
 ---
 
@@ -46,11 +44,10 @@ This function performs outlier detection and missing value imputation within the
 **2. Operational Details**
 
 * **Independent Column Analysis**: Statistical thresholds are calculated independently for each aggregated column.
-* **IQR Mode**: Values outside the range  are replaced with `NaN`.
-* **Z-Score Mode**: Values deviating from the mean by more than 3 standard deviations are replaced with `NaN`.
+    * **IQR Mode**: Values outside the range  are replaced with `NaN`.
+    * **Z-Score Mode**: Values deviating from the mean by more than 3 standard deviations are replaced with `NaN`.
 
-
-* **Global Imputation**: Once outliers are removed, `NaN` values are filled using the global mean or median of that specific column derived from the entire training population.
+* **Global Imputation**: Once outliers are removed, `NaN` values are filled using the statistical value (constant value, mean, median, ...) of that specific column derived from the entire training population.
 
 ### `StaticProcessor.train_test_split`
 
@@ -71,17 +68,20 @@ The `TSProcessor` inherits from `Processor`. It maintains the temporal structure
 ### `TSProcessor.data_cleaning`
 
 **1. Functionality**
-This function cleans individual observations within a sequence while preserving the integrity of the temporal axis.
+This function removes statistical outliers from the time-series observations and implements a multi-stage imputation logic to handle missing values (`NaN`). It ensures that every time step in every sequence has a valid numerical value before tensor conversion.
 
 **2. Operational Details**
 
-* **Timestamp Protection**: During the cleaning process, the timestamp column is explicitly excluded from outlier detection to prevent the corruption of the temporal sequence.
-* **Cascaded Imputation**:
-1. **Local Forward-Fill**: It first attempts to fill `NaN` values using the most recent previous observation for that specific ID (`ffill`).
-2. **Global Back-Fill**: Any remaining `NaN`s (typically at the start of a sequence) are filled using the global mean of that feature across all IDs.
+* **Outlier Nullification**:
+    * Observations are checked against statistical thresholds (IQR or Z-Score).
+    * Any data point identified as an outlier is converted to `NaN`.
 
+* **Cascaded Imputation Logic**:
+    * `Forward Fill (ffill)` follows a temporal logic by carrying the last known value forward to fill subsequent gaps. If a sequence starts with a missing value and has nothing to carry forward, it defaults to the global mean to ensure the gap is filled.
+    * `Statistical Imputation (mean, median, ...)` provides a fixed replacement based on available data. The system follows a hierarchy: it first uses the ID's "local" average, falling back to the "global" dataset average only if the ID is empty. 
+    * `Constant imputation` applying one pre-set number to every gap.
 
-* **Value Clamping**: In addition to standard outlier methods, it provides a `clamp` mode that clips all values to the 5th and 95th percentile range.
+* **Temporal Integrity**: The imputation process is applied only to the feature columns. The `Timestamp` and `ID` columns are never modified, ensuring the temporal sequence and entity alignment remain intact.
 
 ### `TSProcessor.time_resample`
 
@@ -92,7 +92,6 @@ Standardizes the observation frequency for each ID, creating equidistant interva
 
 * **Frequency Regularization**: Generates a new time grid based on the `freq` parameter (e.g., '1H' for hourly).
 * **Linear Interpolation**: Values for the newly created time steps are calculated using linear interpolation between existing points.
-* **Sequence Length Maintenance**: Resampling ensures a consistent time delta within an ID, but it does not force different IDs to have the same total number of observations.
 
 ### `TSProcessor.train_test_split`
 
@@ -121,28 +120,14 @@ Generates a comprehensive performance report and visualization suite for a train
 * **Metrics Generation**: Produces a standard classification report containing Precision, Recall, and F1-score.
 * **Confusion Matrix Visualization**: Renders a heatmap comparing predicted labels against true labels.
 * **ROC Strategy**:
-* For binary tasks, it plots the standard ROC curve.
-* For multi-class tasks, it employs a "One-vs-Rest" (OvR) approach, calculating an independent ROC curve and AUC score for every individual class.
+    * For binary tasks, it plots the standard ROC curve.
+    * For multi-class tasks, it employs a "One-vs-Rest" (OvR) approach, calculating an independent ROC curve and AUC score for every individual class.
 
-
-
-### `StaticClassifier.fit` (Inherits from Classifier)
+### `Classifier.fit` (Inherits from Classifier)
 
 **1. Functionality**
-Initializes and trains non-temporal models, such as XGBoost.
+Initializes the selected model (e.g., XGBoost) and executes the training process.
 
 **2. Operational Details**
 
-* **Integrated Monitoring**: Automatically assigns the training set as the `eval_set` during the fit process. This allows the model to capture and store the loss history for every boosting round.
-* **Configuration Merging**: Merges user-defined `model_config` parameters with internal `DEFAULT_CONFIGS` to instantiate the underlying model.
-
-### `TSClassifier.fit` (Inherits from Classifier)
-
-**1. Functionality**
-Initializes and trains deep learning sequence models like LSTM or Time-Aware LSTM (T-LSTM).
-
-**2. Operational Details**
-
-* **Dynamic Tensor Adaptation**: The input layer size of the neural network is automatically determined by the third dimension (feature count) of the input training tensor.
-* **Time-Aware Processing**: For `T-LSTM` models, the class uses the `time_index` to isolate the time-delta column. This column is fed into the specialized time-decay gates of the T-LSTM cell, while all other features are processed through standard LSTM gates.
-* **Convergence Visualization**: Upon completion of training, it utilizes the `loss_history` attribute to automatically trigger the base class plotting functions to display the training curve.
+* **Configuration**: Combines user parameters with default values ​​and triggers the model's training routine, while recording the loss to plot a graph.

@@ -136,19 +136,33 @@ class TSProcessor(Processor):
                 self.wide_df[col] = self.wide_df[col].clip(low, high)
 
         self.features.append(self.time_col)
+
+        # 1. Forward Fill Strategy: ID-level history first, then Global Mean
         if fill_missing == 'ffill':
-            # Local forward fill followed by global mean for any remaining NaNs
+            # Fill NaNs using the previous valid observation within the same ID group
             self.wide_df[self.features] = self.wide_df.groupby(self.id_col)[self.features].ffill()
-            self.wide_df[self.features] = self.wide_df[self.features].fillna(self.wide_df[self.features].mean())
-            fill_missing = 'mean'
+            # If the first observation of an ID is NaN, ffill cannot fix it; use global mean
+            global_mean = self.wide_df[self.features].mean()
+            self.wide_df[self.features] = self.wide_df[self.features].fillna(global_mean)
 
-        if fill_missing in ['mean', 'median']:
-            # Cascade imputation: fill with group-specific stats first, then global stats
-            group_stats = self.wide_df.groupby(self.id_col)[self.features].transform(fill_missing)
-            global_stats = getattr(self.wide_df[self.features], fill_missing)()
+        # 2. Mean Strategy: ID-level average first, then Global average
+        elif fill_missing == 'mean':
+            group_mean = self.wide_df.groupby(self.id_col)[self.features].transform('mean')
+            global_mean = self.wide_df[self.features].mean()
+            # Fill with the average of that specific ID, then fall back to dataset average
+            self.wide_df[self.features] = self.wide_df[self.features].fillna(group_mean)
+            self.wide_df[self.features] = self.wide_df[self.features].fillna(global_mean)
 
-            self.wide_df[self.features] = self.wide_df[self.features].fillna(group_stats)
-            self.wide_df[self.features] = self.wide_df[self.features].fillna(global_stats)
+        # 3. Median Strategy: ID-level median first, then Global median
+        elif fill_missing == 'median':
+            group_median = self.wide_df.groupby(self.id_col)[self.features].transform('median')
+            global_median = self.wide_df[self.features].median()
+            # Fill with the median of that specific ID, then fall back to dataset median
+            self.wide_df[self.features] = self.wide_df[self.features].fillna(group_median)
+            self.wide_df[self.features] = self.wide_df[self.features].fillna(global_median)
+
+        elif isinstance(fill_missing, (int, float)):
+            self.wide_df[self.features] = self.wide_df[self.features].fillna(fill_missing)
 
         self.features.remove(self.time_col)
         return self.wide_df
