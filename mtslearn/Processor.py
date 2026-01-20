@@ -3,6 +3,7 @@ import numpy as np
 import os
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
+import warnings
 
 
 class Processor:
@@ -111,61 +112,133 @@ class Processor:
 
 class TSProcessor(Processor):
 
-    def data_cleaning(self, fill_missing='mean', outlier_method='iqr'):
+    def data_cleaning(self, X_train, X_test, fill_missing='mean', outlier_method='iqr'):
         """
-        Clean data by handling outliers and imputing missing values.
+        Perform statistical cleaning on 3D Tensor features.
+        Operates on (Samples, TimeSteps, Features) tensors.
 
         Parameters:
-        - fill_missing: Method to fill NaNs ('mean', 'median', or 'ffill').
-        - outlier_method: Strategy for outlier detection ('iqr', 'zscore', or 'clamp').
+        - X_train (np.ndarray): 3D Tensor [Samples, TimeSteps, Features].
+        - X_test (np.ndarray): 3D Tensor [Samples, TimeSteps, Features].
+        - fill_missing (str): 'mean', 'median', 'ffill' (intra-sample first, then global train).
+        - outlier_method (str): 'iqr', 'zscore', 'clamp'.
+
+        Returns:
+        - X_train, X_test (np.ndarray): Cleaned 3D Tensors.
         """
-        for col in self.features:
+        # Ensure inputs are float type to allow np.nan assignment
+        X_train = X_train.astype(np.float64)
+        X_test = X_test.astype(np.float64)
+
+        n_features = X_train.shape[2]
+
+        # Iterate over each feature channel
+        for i in range(n_features):
+            # Skip the time_delta column (usually we don't clean the time interval feature)
+            if hasattr(self, 'time_index') and i == self.time_index:
+                continue
+
+            # --- 1. Outlier Detection (Based strictly on X_train stats) ---
+
+            # Flatten X_train to calculate global statistics for this feature
+            # Note: We use nan-safe functions to ignore any existing NaNs
+            train_flat = X_train[:, :, i].flatten()
+            train_valid = train_flat
+
             if outlier_method == 'iqr':
-                q1, q3 = self.wide_df[col].quantile([0.25, 0.75])
+                q1 = np.nanquantile(train_valid, 0.25)
+                q3 = np.nanquantile(train_valid, 0.75)
                 iqr = q3 - q1
-                # Replace outliers with NaN to prepare for statistical imputation
-                self.wide_df.loc[(self.wide_df[col] < q1 - 1.5*iqr) | (self.wide_df[col] > q3 + 1.5*iqr), col] = np.nan
+                lower = q1 - 1.5*iqr
+                upper = q3 + 1.5*iqr
+
+                # Apply mask (Set outliers to NaN)
+                X_train[(X_train[:, :, i] < lower) | (X_train[:, :, i] > upper), i] = np.nan
+                X_test[(X_test[:, :, i] < lower) | (X_test[:, :, i] > upper), i] = np.nan
 
             elif outlier_method == 'zscore':
-                mean, std = self.wide_df[col].mean(), self.wide_df[col].std()
-                self.wide_df.loc[(self.wide_df[col] - mean).abs() > 3 * std, col] = np.nan
+                mean = np.nanmean(train_valid)
+                std = np.nanstd(train_valid)
+                if std > 0:
+                    # Apply z-score threshold
+                    X_train[np.abs(X_train[:, :, i] - mean) > 3 * std, i] = np.nan
+                    X_test[np.abs(X_test[:, :, i] - mean) > 3 * std, i] = np.nan
 
             elif outlier_method == 'clamp':
-                # Force values into the 5th and 95th percentile range
-                low, high = self.wide_df[col].quantile([0.05, 0.95])
-                self.wide_df[col] = self.wide_df[col].clip(low, high)
+                low = np.nanquantile(train_valid, 0.05)
+                high = np.nanquantile(train_valid, 0.95)
+                # Clip values
+                X_train[:, :, i] = np.clip(X_train[:, :, i], low, high)
+                X_test[:, :, i] = np.clip(X_test[:, :, i], low, high)
 
-        self.features.append(self.time_col)
+            # --- 2. Missing Value Imputation (Sample-level first, then Global Train) ---
 
-        # 1. Forward Fill Strategy: ID-level history first, then Global Mean
-        if fill_missing == 'ffill':
-            # Fill NaNs using the previous valid observation within the same ID group
-            self.wide_df[self.features] = self.wide_df.groupby(self.id_col)[self.features].ffill()
-            # If the first observation of an ID is NaN, ffill cannot fix it; use global mean
-            global_mean = self.wide_df[self.features].mean()
-            self.wide_df[self.features] = self.wide_df[self.features].fillna(global_mean)
+            # Calculate Global Statistic from Train (Fallback)
+            if fill_missing == 'median':
+                global_fill = np.nanmedian(train_valid)
+            elif isinstance(fill_missing, (int, float)):
+                global_fill = fill_missing
+            else:  # default to mean
+                global_fill = np.nanmean(train_valid)
 
-        # 2. Mean Strategy: ID-level average first, then Global average
-        elif fill_missing == 'mean':
-            group_mean = self.wide_df.groupby(self.id_col)[self.features].transform('mean')
-            global_mean = self.wide_df[self.features].mean()
-            # Fill with the average of that specific ID, then fall back to dataset average
-            self.wide_df[self.features] = self.wide_df[self.features].fillna(group_mean)
-            self.wide_df[self.features] = self.wide_df[self.features].fillna(global_mean)
+            # If global stat is NaN (empty column), fill with 0
+            if np.isnan(global_fill):
+                global_fill = 0.0
 
-        # 3. Median Strategy: ID-level median first, then Global median
-        elif fill_missing == 'median':
-            group_median = self.wide_df.groupby(self.id_col)[self.features].transform('median')
-            global_median = self.wide_df[self.features].median()
-            # Fill with the median of that specific ID, then fall back to dataset median
-            self.wide_df[self.features] = self.wide_df[self.features].fillna(group_median)
-            self.wide_df[self.features] = self.wide_df[self.features].fillna(global_median)
+            # Define helper to apply filling per sample (ID)
+            def fill_channel(tensor_channel, strategy):
+                # tensor_channel shape: (Samples, TimeSteps)
 
-        elif isinstance(fill_missing, (int, float)):
-            self.wide_df[self.features] = self.wide_df[self.features].fillna(fill_missing)
+                if strategy == 'ffill':
+                    # Use pandas ffill purely for convenience on rows
+                    # Convert to DataFrame: Rows=Samples, Cols=TimeSteps
+                    # DataFrame.ffill(axis=1) fills along TimeSteps (columns)
+                    df_temp = pd.DataFrame(tensor_channel)
+                    df_temp = df_temp.ffill(axis=1)
+                    return df_temp.values
 
-        self.features.remove(self.time_col)
-        return self.wide_df
+                elif strategy == 'mean':
+                    # Calculate mean per sample (Row-wise mean), ignoring NaNs
+                    # shape: (Samples, 1)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", category=RuntimeWarning)
+                        sample_means = np.nanmean(tensor_channel, axis=1, keepdims=True)
+                    # Replace NaNs in the tensor with the corresponding sample mean
+                    # np.where(condition, x, y)
+                    return np.where(np.isnan(tensor_channel), sample_means, tensor_channel)
+
+                elif strategy == 'median':
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", category=RuntimeWarning)
+                        sample_medians = np.nanmedian(tensor_channel, axis=1, keepdims=True)
+                    return np.where(np.isnan(tensor_channel), sample_medians, tensor_channel)
+
+                return tensor_channel
+
+            # Apply Imputation
+            if isinstance(fill_missing, str):
+                # 1. Intra-Sample Fill (ID specific)
+                # Fill X_train using its own sample history/stats
+                X_train[:, :, i] = fill_channel(X_train[:, :, i], fill_missing)
+                # Fill X_test using its own sample history/stats (Not leakage: using own past/context)
+                X_test[:, :, i] = fill_channel(X_test[:, :, i], fill_missing)
+
+                # 2. Global Fallback (using Train stats)
+                # Fill any remaining NaNs (e.g., start of sequence for ffill, or all-NaN samples)
+                mask_train = np.isnan(X_train[:, :, i])
+                mask_test = np.isnan(X_test[:, :, i])
+
+                X_train[mask_train, i] = global_fill
+                X_test[mask_test, i] = global_fill
+
+            else:
+                # Constant fill
+                mask_train = np.isnan(X_train[:, :, i])
+                X_train[mask_train, i] = global_fill
+                mask_test = np.isnan(X_test[:, :, i])
+                X_test[mask_test, i] = global_fill
+
+        return X_train, X_test
 
     def time_resample(self, freq='1D', fill_method='linear'):
         """
@@ -307,42 +380,84 @@ class StaticProcessor(Processor):
 
         return self.wide_df
 
-    def data_cleaning(self, fill_missing='mean', outlier_method='iqr'):
+    def data_cleaning(self, X_train, X_test, fill_missing='mean', outlier_method='iqr'):
         """
-        Perform statistical cleaning on aggregated features.
-        Detects outliers via IQR/Z-Score and imputes missing values using global statistics.
+        Perform statistical cleaning on aggregated features. Detects outliers via IQR/Z-Score based on X_train statistics and imputes missing values.
 
         Parameters:
-        - fill_missing (str): Imputation method ('mean', 'median').
-        - outlier_method (str): Logic for detection ('iqr' or 'zscore').
+        - X_train (np.ndarray or pd.DataFrame): The training feature set.
+        - X_test (np.ndarray or pd.DataFrame): The testing feature set.
+        - fill_missing (str): Imputation method ('mean', 'median') calculated on X_train.
+        - outlier_method (str): Logic for detection ('iqr' or 'zscore') derived from X_train.
 
         Returns:
-        - wide_df (pd.DataFrame): The cleaned feature set.
+        - X_train (np.ndarray): The cleaned training set.
+        - X_test (np.ndarray): The cleaned testing set.
         """
-        df = self.wide_df
-        cols = self.features
+        # Ensure inputs are numpy arrays and float type to handle np.nan
+        X_train = X_train.values if hasattr(X_train, 'values') else X_train
+        X_test = X_test.values if hasattr(X_test, 'values') else X_test
+
+        # Create copies and ensure float type (integers cannot hold np.nan)
+        X_train = X_train.astype(float).copy()
+        X_test = X_test.astype(float).copy()
+
+        n_features = X_train.shape[1]
 
         # Iterate through features to flag and nullify extreme statistical outliers
-        for col in cols:
+        # CRITICAL: Statistics must be calculated ONLY on X_train to avoid data leakage
+        for i in range(n_features):
+            train_col = X_train[:, i]
+
             if outlier_method == 'iqr':
-                # Use Interquartile Range to handle skewed distributions
-                q1, q3 = df[col].quantile([0.25, 0.75])
+                # Use Interquartile Range from TRAIN set (using nanquantile to ignore existing NaNs)
+                q1 = np.nanquantile(train_col, 0.25)
+                q3 = np.nanquantile(train_col, 0.75)
                 iqr = q3 - q1
-                df.loc[(df[col] < q1 - 1.5*iqr) | (df[col] > q3 + 1.5*iqr), col] = np.nan
+                lower_bound = q1 - 1.5*iqr
+                upper_bound = q3 + 1.5*iqr
+
+                # Apply outlier masking (set to NaN)
+                # Note: We use boolean indexing directly on the array
+                X_train[(X_train[:, i] < lower_bound) | (X_train[:, i] > upper_bound), i] = np.nan
+                X_test[(X_test[:, i] < lower_bound) | (X_test[:, i] > upper_bound), i] = np.nan
+
             elif outlier_method == 'zscore':
-                # Use Standard Deviation threshold for normal distributions
-                mean, std = df[col].mean(), df[col].std()
-                df.loc[(df[col] - mean).abs() > 3 * std, col] = np.nan
+                # Use Mean/Std from TRAIN set (using nan-safe functions)
+                mean = np.nanmean(train_col)
+                std = np.nanstd(train_col)
 
-        # Fill missing values using the specified global aggregator on the cleaned columns
-        if isinstance(fill_missing, (int, float)):
-            fill_values = fill_missing
-        else:
-            fill_values = getattr(df[cols], fill_missing)()
-        df[cols] = df[cols].fillna(fill_values)
+                # Avoid division by zero if std is 0
+                if std > 0:
+                    # Apply outlier masking
+                    X_train[np.abs(X_train[:, i] - mean) > 3 * std, i] = np.nan
+                    X_test[np.abs(X_test[:, i] - mean) > 3 * std, i] = np.nan
 
-        self.wide_df = df
-        return self.wide_df
+        # Fill missing values using the specified global aggregator derived ONLY from X_train
+        for i in range(n_features):
+            # Calculate fill value on X_train (after outlier removal)
+            if isinstance(fill_missing, (int, float)):
+                fill_val = fill_missing
+            elif fill_missing == 'mean':
+                fill_val = np.nanmean(X_train[:, i])
+            elif fill_missing == 'median':
+                fill_val = np.nanmedian(X_train[:, i])
+            else:
+                raise ValueError(f"Unsupported fill_missing method: {fill_missing}")
+
+            # Check if fill_val is NaN (can happen if a column is full of NaNs)
+            if np.isnan(fill_val):
+                fill_val = 0.0  # Fallback default
+
+            # Apply imputation to NaNs in X_train
+            mask_train = np.isnan(X_train[:, i])
+            X_train[mask_train, i] = fill_val
+
+            # Apply imputation to NaNs in X_test
+            mask_test = np.isnan(X_test[:, i])
+            X_test[mask_test, i] = fill_val
+
+        return X_train, X_test
 
     def train_test_split(self, test_size=0.2, shuffle=True, random_state=None, standardize=True, stratify=False):
         """
