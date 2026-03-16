@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import os
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.model_selection import train_test_split
 import warnings
 
@@ -270,18 +270,61 @@ class TSProcessor(Processor):
         self.wide_df = pd.concat(resampled_groups, ignore_index=True)
         return self.wide_df
 
-    def train_test_split(self, test_size=0.2, shuffle=True, random_state=None, standardize=True):
+    def scale_features(self, X_train, X_test, method='standardize'):
+        """
+        Scales 3D tensors features while preserving zero-padding.
+        
+        Parameters:
+        - X_train, X_test (np.ndarray): 3D Tensors [Samples, TimeSteps, Features].
+        - method (str): Scaling method, 'standardize' or 'normalize'.
+
+        Returns:
+        - X_train_scaled, X_test_scaled (np.ndarray): Scaled 3D Tensors.
+        """
+        if method not in ['standardize', 'normalize', None]:
+            raise ValueError("Method must be 'standardize', 'normalize', or None.")
+
+        if method is None:
+            return X_train, X_test
+
+        if method == 'standardize':
+            scaler = StandardScaler()
+        elif method == 'normalize':
+            scaler = MinMaxScaler()
+
+        # Copy to avoid inplace modification side-effects
+        X_train_scaled = X_train.copy()
+        X_test_scaled = X_test.copy()
+
+        # --- 3D Padding Handling (Masking) ---
+        # Find the real data location that is not padding, mask shape: [Samples, TimeSteps]
+        train_mask = ~np.all(X_train == 0, axis=-1)
+        test_mask = ~np.all(X_test == 0, axis=-1)
+
+        # Extract only the real data (convert to 2D: [Valid_TimeSteps, Features]) for Fit & Transform
+        # This avoids 0 being treated as an actual feature in the statistics and ensures that the padding remains 0 after scaling.
+        X_train_scaled[train_mask] = scaler.fit_transform(X_train[train_mask])
+
+        # Use the scaler of the training set to transform the test set to prevent data leakage.
+        X_test_scaled[test_mask] = scaler.transform(X_test[test_mask])
+
+        self.scaler = scaler
+
+        return X_train_scaled, X_test_scaled
+
+    def train_test_split(self, test_size=0.2, shuffle=True, random_state=None, stratify=False):
         """
         Splits data into 3D tensors by unique IDs for sequence modeling.
         
         Parameters:
-        - test_size (float): Fraction of IDs for testing.
+        - test_size (float or int): Fraction or number of IDs for testing.
         - shuffle (bool): Whether to randomize ID order.
         - random_state (int): Seed for reproducibility.
-        - standardize (bool): Scale features based on training set statistics.
+        - stratify (bool): Whether to perform stratified sampling based on labels.
+        - scale_method (str): 'standardize', 'normalize', or None.
 
         Returns:
-        - X_train, X_test (np.ndarray): 3D Tensors [Samples, TimeSteps, Features].
+        - X_train, X_test (np.ndarray): Scaled 3D Tensors [Samples, TimeSteps, Features].
         - y_train, y_test (np.ndarray): Corresponding labels.
         """
         # --- 1. Feature Engineering & Sorting ---
@@ -293,32 +336,22 @@ class TSProcessor(Processor):
         current_features = self.features + ['time_delta']
         self.time_index = len(current_features) - 1
 
-        # --- 2. ID-based Split ---
+        # --- 2. ID-based Split & Stratified Sampling ---
         unique_ids = df_sorted[self.id_col].unique()
-        # Slice indices based on the calculated split ratio
-        if isinstance(test_size, float):
-            n_test = int(len(unique_ids) * test_size)
-        else:
-            n_test = test_size
 
-        if shuffle:
-            if random_state is not None:
-                np.random.seed(random_state)
-            np.random.shuffle(unique_ids)
+        # Extract corresponding labels for unique IDs if stratification is requested
+        stratify_labels = self.y.loc[unique_ids].values if stratify else None
 
-        test_ids = unique_ids[-n_test:]
-        train_ids = unique_ids[:-n_test]
+        # Delegate split and stratify logic to sklearn
+        train_ids, test_ids = train_test_split(
+            unique_ids,
+            test_size=test_size,
+            random_state=random_state if shuffle else None,
+            shuffle=shuffle,
+            stratify=stratify_labels if stratify and shuffle else None
+        )
 
-        # --- 3. Standardization (Train-fit, Global-transform) ---
-        if standardize:
-            scaler = StandardScaler()
-            # Fit only on training set to avoid data leakage (look-ahead bias)
-            train_mask = df_sorted[self.id_col].isin(train_ids)
-            scaler.fit(df_sorted.loc[train_mask, current_features])
-            df_sorted[current_features] = scaler.transform(df_sorted[current_features])
-            self.scaler = scaler
-
-        # --- 4. 3D Tensor Construction ---
+        # --- 3. 3D Tensor Construction (Before Scaling) ---
         max_steps = df_sorted.groupby(self.id_col).size().max()
         n_features = len(current_features)
 
@@ -332,10 +365,9 @@ class TSProcessor(Processor):
                 tensor[i, :len(group_data), :] = group_data
             return tensor
 
-        X_train = build_tensor(train_ids)
-        X_test = build_tensor(test_ids)
+        X_train, X_test = build_tensor(train_ids), build_tensor(test_ids)
 
-        # --- 5. Label Alignment ---
+        # --- 4. Label Alignment ---
         # Ensure label order strictly matches the shuffled X tensor order
         y_train = self.y.loc[train_ids].values
         y_test = self.y.loc[test_ids].values
@@ -459,7 +491,7 @@ class StaticProcessor(Processor):
 
         return X_train, X_test
 
-    def train_test_split(self, test_size=0.2, shuffle=True, random_state=None, standardize=True, stratify=False):
+    def train_test_split(self, test_size=0.2, shuffle=True, random_state=None, stratify=False):
         """
         Shuffle and partition the static feature matrix into training and testing sets.
         Converts tabular data into 2D NumPy arrays for model ingestion.
@@ -468,7 +500,6 @@ class StaticProcessor(Processor):
         - test_size (float/int): Fraction or absolute number of samples for testing.
         - shuffle (bool): Whether to randomize sample order.
         - random_state (int): Seed for reproducibility.
-        - standardize (bool): Whether to scale features to zero mean and unit variance.
         - stratify (bool): Whether to use stratified sampling based on labels.
 
         Returns:
@@ -479,13 +510,27 @@ class StaticProcessor(Processor):
 
         stratify_param = y if (stratify and shuffle) else None
 
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=test_size, random_state=random_state, shuffle=shuffle, stratify=stratify_param
-        )
+        return train_test_split(X, y, test_size=test_size, random_state=random_state, shuffle=shuffle, stratify=stratify_param)
 
-        if standardize:
-            self.scaler_2d = StandardScaler()
-            X_train = self.scaler_2d.fit_transform(X_train)
-            X_test = self.scaler_2d.transform(X_test)
+    def scale_features(self, X_train, X_test, method='standard'):
+        """
+        Scale features using specified method.
 
-        return X_train, X_test, y_train, y_test
+        Parameters:
+        - X_train, X_test: Feature matrices.
+        - method (str): 'standard' (StandardScaler) or 'minmax' (MinMaxScaler).
+
+        Returns:
+        - X_train, X_test: Scaled feature matrices.
+        """
+        if method == 'standardize':
+            scaler = StandardScaler()
+        elif method == 'normalize':
+            scaler = MinMaxScaler()
+        else:
+            raise ValueError(f"Unknown scale method: '{method}'. Use 'standardize' or 'normalize'.")
+
+        X_train = scaler.fit_transform(X_train)
+        X_test = scaler.transform(X_test)
+
+        return X_train, X_test

@@ -2,132 +2,85 @@
 
 ## 1. Data Ingestion: The Processor Base Class
 
-The `Processor` class is an abstract base class designed to define the standard protocol for data loading and format conversion. It provides the core `read_file` logic for its subclasses, `StaticProcessor` and `TSProcessor`.
+The `Processor` class handles loading your raw data and converting it into a standard "wide-format" table. Both static and time-series processors build upon this base.
 
 ### `Processor.read_file`
-
-**1. Functionality**
-This function loads raw data from CSV or Excel files and transforms it into a structured "wide-format" DataFrame, where rows are indexed by a combination of `ID` and `Timestamp`.
-
-**2. Operational Details**
-
-* **Inheritance Role**: This method establishes a unified data structure, ensuring that both static and temporal subclasses operate on the same underlying schema.
-* **Format Transformation**:
-    * **Long Format**: Uses `pivot_table` to expand multiple rows of measurements into columns based on `id_col` and `time_col`.
-    * **Flattened Format**: Parses pairs of `(Attribute, Time)` columns, stacks them, and reshapes them into a feature-oriented wide table.
-
-* **Handling of Invariant Variables**: Variables that do not change over time (e.g., gender, race) are treated as constant time-series variables, with their values replicated across all timestamps for that ID.
-* **Timestamp Normalization**: All time data is converted into Unix Epoch seconds (float), enabling numerical calculations for time intervals in downstream modules.
+* **What it does**: Reads CSV or Excel files and reshapes the data so that every row represents a unique combination of an `ID` and a `Timestamp`.
+* **How it works**:
+    * **Format Support**: It can automatically reshape `long` formats (one metric per row) or `flattened` formats (paired attribute-time columns) into a clean, wide table.
+    * **Time Conversion**: It converts datetime columns into simple floating-point numbers (Unix seconds). This allows the models to easily calculate the time gaps between observations.
+    * **Label Mapping**: It assigns a single target label to each unique ID.
 
 ---
 
 ## 2. Static Analysis: The StaticProcessor
 
-The `StaticProcessor` inherits from `Processor`. Its primary purpose is to collapse the temporal dimension of sequence data into a single-dimensional static feature vector per ID.
+The `StaticProcessor` is used when you want to ignore the sequential nature of the data and squash all time-steps into a single row of summary statistics for each ID (e.g., for models like XGBoost).
 
 ### `StaticProcessor.extract_features`
-
-**1. Functionality**
-This function aggregates all time-series observations for each ID into summary statistics, effectively removing the time dimension.
-
-**2. Operational Details**
-
-* **Statistical Expansion**: For every feature in the input list, the function applies each operation defined in `agg_funcs` (e.g., `mean`, `std`, `max`). This results in a feature space expansion where the total number of columns equals `len(features) * len(agg_funcs)`.
-* **Temporal Duration**: If `include_duration=True`, it calculates the difference between the final and first timestamps for each ID, appending a new feature named `duration`.
-* **Explicit Naming**: To maintain independence and traceability, new columns are named following the strict `FeatureName_FunctionName` convention.
+* **What it does**: Flattens the time-series data into static features (like mean, max, min).
+* **How it works**: 
+    * It calculates the requested statistics (`agg_funcs`) for every feature. 
+    * It renames columns clearly (e.g., `HeartRate_mean`, `BloodPressure_max`).
+    * If `include_duration=True`, it calculates how much time passed between the first and last observation and adds it as a `duration` column.
 
 ### `StaticProcessor.data_cleaning`
-
-**1. Functionality**
-This function performs outlier detection and missing value imputation within the aggregated static feature space.
-
-**2. Operational Details**
-
-* **Independent Column Analysis**: Statistical thresholds are calculated independently for each aggregated column.
-    * **IQR Mode**: Values outside the range  are replaced with `NaN`.
-    * **Z-Score Mode**: Values deviating from the mean by more than 3 standard deviations are replaced with `NaN`.
-
-* **Global Imputation**: Once outliers are removed, `NaN` values are filled using the statistical value (constant value, mean, median, ...) of that specific column derived from the entire training population.
+* **What it does**: Removes extreme outliers and fills in missing values (`NaN`).
+* **How it works**:
+    * **Leakage Prevention (Important)**: It calculates outlier thresholds (IQR or Z-score) and fill values (mean or median) **strictly on the training set**. These exact same rules are then applied to the test set.
+    * Any value deemed an outlier is temporarily turned into a `NaN`, and then all `NaN` values are filled globally based on your chosen method.
 
 ### `StaticProcessor.train_test_split`
+* **What it does**: Splits the flat data into training and testing sets (2D NumPy arrays).
+* **How it works**: Randomizes the data and supports `stratify` to ensure the ratio of target classes remains balanced between the train and test sets.
 
-**1. Functionality**
-Partitions the static feature matrix into training and testing sets, converting the data into 2D NumPy arrays.
-
-**2. Operational Details**
-
-* **Standardization Isolation**: When `standardize=True`, the `StandardScaler` is fitted exclusively on the training set. This scaler is then used to transform the test set, preventing information leakage from future data.
-* **Stratified Sampling**: Supports the `stratify` parameter to ensure that the class distribution in the splits remains consistent with the original dataset proportions.
+### `StaticProcessor.scale_features` 
+* **What it does**: Standardizes or normalizes the features.
+* **How it works**: Uses Scikit-Learn's `StandardScaler` or `MinMaxScaler`. It fits on the training data and transforms both train and test data.
 
 ---
 
 ## 3. Time-Series Analysis: The TSProcessor
 
-The `TSProcessor` inherits from `Processor`. It maintains the temporal structure of the data and is responsible for generating the 3D tensors required for deep learning models.
-
-### `TSProcessor.data_cleaning`
-
-**1. Functionality**
-This function removes statistical outliers from the time-series observations and implements a multi-stage imputation logic to handle missing values (`NaN`). It ensures that every time step in every sequence has a valid numerical value before tensor conversion.
-
-**2. Operational Details**
-
-* **Outlier Nullification**:
-    * Observations are checked against statistical thresholds (IQR or Z-Score).
-    * Any data point identified as an outlier is converted to `NaN`.
-
-* **Cascaded Imputation Logic**:
-    * `Forward Fill (ffill)` follows a temporal logic by carrying the last known value forward to fill subsequent gaps. If a sequence starts with a missing value and has nothing to carry forward, it defaults to the global mean to ensure the gap is filled.
-    * `Statistical Imputation (mean, median, ...)` provides a fixed replacement based on available data. The system follows a hierarchy: it first uses the ID's "local" average, falling back to the "global" dataset average only if the ID is empty. 
-    * `Constant imputation` applying one pre-set number to every gap.
-
-* **Temporal Integrity**: The imputation process is applied only to the feature columns. The `Timestamp` and `ID` columns are never modified, ensuring the temporal sequence and entity alignment remain intact.
-
-### `TSProcessor.time_resample`
-
-**1. Functionality**
-Standardizes the observation frequency for each ID, creating equidistant intervals between data points.
-
-**2. Operational Details**
-
-* **Frequency Regularization**: Generates a new time grid based on the `freq` parameter (e.g., '1H' for hourly).
-* **Linear Interpolation**: Values for the newly created time steps are calculated using linear interpolation between existing points.
+The `TSProcessor` preserves the sequence of events over time. It transforms your data into 3D tensors `(Samples, TimeSteps, Features)` required by Deep Learning models like LSTMs.
 
 ### `TSProcessor.train_test_split`
+* **What it does**: Groups data by ID and builds the 3D tensors.
+* **How it works**:
+    * **Time Deltas**: Automatically calculates the time gap (`time_delta`) since the previous observation and adds it as a new feature.
+    * **Zero-Padding**: Finds the longest sequence in the dataset. Any sequence shorter than this is padded with zeros at the end so all samples have the exact same shape.
+    * Splits the data by unique ID to ensure no single ID's timeline is broken across both train and test sets.
 
-**1. Functionality**
-Transforms the wide-format DataFrame into a 3D NumPy tensor of shape `(Samples, TimeSteps, Features)`.
+### `TSProcessor.data_cleaning`
+* **What it does**: Cleans 3D tensors by removing outliers and filling missing values.
+* **How it works**:
+    * **Smart Time Handling**: It deliberately ignores the `time_delta` column, ensuring time intervals are never accidentally altered or "cleaned".
+    * **Two-Step Filling**: When filling missing values, it first looks at the specific ID's own history (e.g., carrying the last known value forward, or using that specific patient's average). If the entire history is missing, it falls back to the global average of the training set.
 
-**2. Operational Details**
+### `TSProcessor.scale_features` 
+* **What it does**: Scales 3D sequence features safely.
+* **How it works**: It applies scaling *only* to the actual data. It uses a masking technique to ensure that the zero-padding at the end of sequences is completely ignored during math calculations and remains exactly `0` after scaling.
 
-* **ID-Based Partitioning**: The split logic operates on the unique ID list. This ensures that all time steps belonging to a single entity are kept together in either the training or testing set.
-* **Temporal Delta Calculation**: The function automatically computes a `time_delta` feature (the interval since the previous observation) and appends it as the final feature channel in the tensor.
-* **Automatic Zero-Padding**: The system identifies the maximum sequence length (`max_steps`) in the dataset. Sequences shorter than this length are padded with zeros at the end of the sequence to ensure uniform tensor dimensions.
+### `TSProcessor.time_resample`
+* **What it does**: Forces erratic timestamps into fixed, regular intervals (e.g., exactly every 1 hour or 1 day).
+* **How it works**: Groups the data by ID, creates a new fixed time grid, and uses linear interpolation to guess what the values were at those exact fixed times.
 
 ---
 
 ## 4. Model Orchestration: The Classifier Base Class
 
-`Classifier` is a base class providing a unified interface for model training and evaluation. It is inherited by `StaticClassifier` (for tabular models) and `TSClassifier` (for sequence models).
+The `Classifier` class provides a single, unified way to train and evaluate any model—whether it’s a static model like XGBoost or a deep sequence model like an LSTM. 
+
+### `Classifier.fit`
+* **What it does**: Trains your selected model.
+* **How it works**: 
+    * Merges default model settings with any custom hyperparameters you provide.
+    * Triggers the model's internal training loop.
+    * **Auto-Plotting**: If the model records its training loss over time, it will automatically plot a Training Loss curve for you once training finishes.
 
 ### `Classifier.evaluate`
-
-**1. Functionality**
-Generates a comprehensive performance report and visualization suite for a trained model.
-
-**2. Operational Details**
-
-* **Metrics Generation**: Produces a standard classification report containing Precision, Recall, and F1-score.
-* **Confusion Matrix Visualization**: Renders a heatmap comparing predicted labels against true labels.
-* **ROC Strategy**:
-    * For binary tasks, it plots the standard ROC curve.
-    * For multi-class tasks, it employs a "One-vs-Rest" (OvR) approach, calculating an independent ROC curve and AUC score for every individual class.
-
-### `Classifier.fit` (Inherits from Classifier)
-
-**1. Functionality**
-Initializes the selected model (e.g., XGBoost) and executes the training process.
-
-**2. Operational Details**
-
-* **Configuration**: Combines user parameters with default values ​​and triggers the model's training routine, while recording the loss to plot a graph.
+* **What it does**: Tests the model and visually reports its performance.
+* **How it works**:
+    * **Text Report**: Prints a clean summary showing Precision, Recall, F1-score, and overall accuracy.
+    * **Confusion Matrix**: Plots a color-coded heatmap showing exactly where the model predicted correctly and where it got confused.
+    * **ROC Curves**: Automatically draws ROC curves. For binary classification, it draws a single curve. For multi-class problems, it draws a separate curve for every single class (One-vs-Rest).

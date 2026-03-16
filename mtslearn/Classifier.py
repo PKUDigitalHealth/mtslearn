@@ -14,7 +14,7 @@ class Classifier:
     diverse machine learning models including Deep Learning and Gradient Boosting.
     """
 
-    def fit(self, X_train, y_train, model_config={}):
+    def fit(self, X_train, y_train, **model_config):
         """
         Initializes and trains the selected model architecture.
 
@@ -30,6 +30,7 @@ class Classifier:
 
         self.model = model_cls(**params)
         self.model.fit(X_train, y_train)
+        self.num_classes = len(np.unique(y_train))
 
         # Automated trigger for loss visualization if the model records convergence history
         if hasattr(self.model, 'loss_history'):
@@ -45,7 +46,10 @@ class Classifier:
         Returns:
         - tuple: (class_predictions, class_probabilities)
         """
-        return self.model.predict(X_test)
+        if hasattr(self.model, "predict_proba"):
+            return self.model.predict_proba(X_test)
+        else:
+            return self.model.predict(X_test)
 
     def evaluate(self, X_test, y_test, class_names=None):
         """
@@ -56,14 +60,17 @@ class Classifier:
         - y_test (np.ndarray): True labels.
         - class_names (list of str, optional): Human-readable labels for categories.
         """
-        y_pred, y_probs = self.predict(X_test)
-        num_classes = 2
+        y_probs = self.predict(X_test)
+        if y_probs.ndim == 1:
+            y_pred = y_probs
+        else:
+            y_pred = np.argmax(y_probs, axis=1)
 
         print(f"\n--- {self.model_type} Classification Report ---")
         print(classification_report(y_test, y_pred, target_names=class_names))
 
         self._plot_confusion_matrix(y_test, y_pred, class_names)
-        self._plot_roc_curve(y_test, y_probs, num_classes)
+        self._plot_roc_curve(y_test, y_probs, self.num_classes)
 
     def _plot_loss(self, loss_history):
         """

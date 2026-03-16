@@ -155,7 +155,7 @@ class TorchModelWrapper:
             logits = self.model(X)
             probs = torch.softmax(logits, dim=1)
             preds = torch.argmax(probs, dim=1)
-        return preds.numpy(), probs.numpy()
+        return probs.numpy()
 
 
 class LSTM(TorchModelWrapper):
@@ -194,10 +194,3 @@ class XGB(XGBClassifier):
         metric_name = list(results['validation_0'].keys())[0]
         self.loss_history = results['validation_0'][metric_name]
         return self
-
-    def predict(self, X):
-        """
-        Returns:
-        - tuple: (hard_predictions, soft_probabilities) to match TorchModelWrapper signature.
-        """
-        return super().predict(X), super().predict_proba(X)
