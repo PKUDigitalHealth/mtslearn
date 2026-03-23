@@ -7,19 +7,20 @@ name = "mtslearn"
 version = "0.1.0"
 description = "The Medical Time-Series Analysis Toolkit mtslearn is designed to process and analyze complex, irregularly sampled medical data."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = "=3.12"
 license = {text = "MIT"}
 authors = [
     { name = "Zhongheng Jiang" },
     { name = "Yuechao Zhao" },
 ]
 dependencies = [
-    "matplotlib>=3.10.8",
-    "numpy>=2.0.2",
-    "pandas>=2.3.3",
-    "scikit-learn>=1.6.0",
-    "torch>=2.5.1",
-    "xgboost>=3.1.2",
+    "lifelines==0.30.1",
+    "matplotlib==3.10.8",
+    "numpy==2.0.2",
+    "pandas==2.3.3",
+    "scikit-learn==1.6.0",
+    "torch==2.4.1",
+    "xgboost==3.1.2",
 ]
 
 [project.urls]

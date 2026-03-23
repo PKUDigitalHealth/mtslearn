@@ -9,7 +9,7 @@ The `Processor` class handles loading your raw data and converting it into a sta
 * **How it works**:
     * **Format Support**: It can automatically reshape `long` formats (one metric per row) or `flattened` formats (paired attribute-time columns) into a clean, wide table.
     * **Time Conversion**: It converts datetime columns into simple floating-point numbers (Unix seconds). This allows the models to easily calculate the time gaps between observations.
-    * **Label Mapping**: It assigns a single target label to each unique ID.
+    * **Label Mapping**: It assigns a single target label to each unique ID (static), or dynamic labels for each time point.
 
 ---
 
@@ -23,6 +23,7 @@ The `StaticProcessor` is used when you want to ignore the sequential nature of t
     * It calculates the requested statistics (`agg_funcs`) for every feature. 
     * It renames columns clearly (e.g., `HeartRate_mean`, `BloodPressure_max`).
     * If `include_duration=True`, it calculates how much time passed between the first and last observation and adds it as a `duration` column.
+    * For `dynamic` labels, it preserves all time points but attaches global entity statistics to each row.
 
 ### `StaticProcessor.data_cleaning`
 * **What it does**: Removes extreme outliers and fills in missing values (`NaN`).
@@ -31,8 +32,8 @@ The `StaticProcessor` is used when you want to ignore the sequential nature of t
     * Any value deemed an outlier is temporarily turned into a `NaN`, and then all `NaN` values are filled globally based on your chosen method.
 
 ### `StaticProcessor.train_test_split`
-* **What it does**: Splits the flat data into training and testing sets (2D NumPy arrays).
-* **How it works**: Randomizes the data and supports `stratify` to ensure the ratio of target classes remains balanced between the train and test sets.
+* **What it does**: Splits the flat data into training and testing sets.
+* **How it works**: Randomizes the data and supports `stratify` to ensure the ratio of target classes remains balanced between the train and test sets for static labels. It also handles sequence-padding automatically if using dynamic labels.
 
 ### `StaticProcessor.scale_features` 
 * **What it does**: Standardizes or normalizes the features.
@@ -48,8 +49,8 @@ The `TSProcessor` preserves the sequence of events over time. It transforms your
 * **What it does**: Groups data by ID and builds the 3D tensors.
 * **How it works**:
     * **Time Deltas**: Automatically calculates the time gap (`time_delta`) since the previous observation and adds it as a new feature.
-    * **Zero-Padding**: Finds the longest sequence in the dataset. Any sequence shorter than this is padded with zeros at the end so all samples have the exact same shape.
-    * Splits the data by unique ID to ensure no single ID's timeline is broken across both train and test sets.
+    * **Zero-Padding & Truncation**: Finds the longest sequence (or uses a provided `max_len`). It extracts the *latest* observations up to the max length, placing them at the start of the tensor, and padding any remaining length with zeros at the end so all samples have the exact same shape.
+    * Splits the data by unique ID to prevent data leakage across time steps.
 
 ### `TSProcessor.data_cleaning`
 * **What it does**: Cleans 3D tensors by removing outliers and filling missing values.
@@ -67,9 +68,9 @@ The `TSProcessor` preserves the sequence of events over time. It transforms your
 
 ---
 
-## 4. Model Orchestration: The Classifier Base Class
+## 4. Model Orchestration: The Classifier Base Classes
 
-The `Classifier` class provides a single, unified way to train and evaluate any model—whether it’s a static model like XGBoost or a deep sequence model like an LSTM. 
+The Toolkit provides specific Orchestrators (`Static_Classifier` and `Temporal_Classifier`) to provide a single, unified way to train and evaluate models based on their input/output types—whether it’s a static-to-static model like XGBoost, temporal-to-static like LSTM/T-LSTM, temporal-to-temporal like Transformers, or static-to-temporal like CoxPH.
 
 ### `Classifier.fit`
 * **What it does**: Trains your selected model.
@@ -82,5 +83,5 @@ The `Classifier` class provides a single, unified way to train and evaluate any 
 * **What it does**: Tests the model and visually reports its performance.
 * **How it works**:
     * **Text Report**: Prints a clean summary showing Precision, Recall, F1-score, and overall accuracy.
-    * **Confusion Matrix**: Plots a color-coded heatmap showing exactly where the model predicted correctly and where it got confused.
-    * **ROC Curves**: Automatically draws ROC curves. For binary classification, it draws a single curve. For multi-class problems, it draws a separate curve for every single class (One-vs-Rest).
+    * **Confusion Matrix & ROC Curves (Static Outputs)**: For models outputting a single label per patient, it plots a color-coded heatmap showing predictions vs truth, and automatically draws single or multi-class ROC curves.
+    * **Temporal Error Distributions (Temporal Outputs)**: For models outputting a sequence of labels (e.g., Seq2Seq), it generates fine-grained histograms of sample-wise misclassification rates and time-step-wise directional errors.

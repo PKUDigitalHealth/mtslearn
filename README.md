@@ -7,8 +7,8 @@ The **Medical Time-Series Analysis Toolkit** `mtslearn` is designed to process a
 * **Multi-Format Data Support**: Handles both **Static** and **Time-Series** data processing workflows.
 * **Flexible Data Ingestion**: Supports both **Wide** and **Long** data formats commonly found in clinical electronic health records (EHR).
 * **Advanced Temporal Modeling**: Features **T-LSTM (Time-Aware LSTM)** to specifically handle irregular time intervals between patient visits.
-* **Diverse Model Integration**: Supports a variety of architectures, from XGBoost for static features to LSTM and T-LSTM for time series features .
-* **End-to-End Pipeline**: Integrated modules for data cleaning, outlier detection, resampling, standardization, and performance evaluation (ROC/Confusion Matrix).
+* **Diverse Model Integration**: Supports a variety of architectures, from XGBoost and CoxPH for static features to LSTM, T-LSTM, and Transformer for time series features.
+* **End-to-End Pipeline**: Integrated modules for data cleaning, outlier detection, resampling, standardization, and performance evaluation (ROC/Confusion Matrix for static outputs, Error Distributions for temporal outputs).
 
 ## 🛠 Installation
 

@@ -20,11 +20,9 @@ class TimeLSTM(nn.Module):
         # h: [b, hid]
         # c: [b, hid]
         b, seq, embed = inputs.size()
-        h = torch.zeros(b, self.hidden_size, requires_grad=False)
-        c = torch.zeros(b, self.hidden_size, requires_grad=False)
-        if self.cuda_flag:
-            h = h.cuda()
-            c = c.cuda()
+        h = torch.zeros(b, self.hidden_size, device=inputs.device)
+        c = torch.zeros(b, self.hidden_size, device=inputs.device)
+
         outputs = []
         for s in range(seq):
             c_s1 = torch.tanh(self.W_d(c))

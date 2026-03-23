@@ -7,110 +7,384 @@ import warnings
 
 
 class Processor:
+    """
+    A high-level data processing engine designed to transform diverse raw data formats 
+    (long, flattened, wide) into a unified structured format suitable for machine learning 
+    or time-series analysis.
+    """
 
     def __init__(self):
+        """
+        Initializes the Processor with placeholders for data storage and metadata.
+        """
         self.wide_df = None
         self.id_col = None
         self.time_col = None
         self.label_col = None
+        self.label_type = None
+        self.y = None
         self.features = []
 
-    def read_file(self, file_path, time_col, id_col, label_col=None, value_col=None, attr_col=None, data_type='long'):
+    def _load_raw_df(self, file_path):
         """
-        Read data from Excel and convert long-format data to wide-format.
+        Internal utility to automatically identify file extensions and load the raw DataFrame.
 
         Parameters:
-        - file_path: Path to the Excel file.
-        - time_col: Name of the timestamp column.
-        - id_col: Name of the ID column.
-        - label_col: Name of the target label column.
-        - value_col: Name of the metric value column (for long format).
-        - attr_col: Name of the attribute/feature name column (for long format).
-        - data_type: Format of input data ('long' or 'wide').
-        """
-        self.id_col = id_col
-        self.time_col = time_col
-        self.label_col = label_col
+        - file_path (str): The system path to the data file.
 
-        if file_path.endswith('.csv') or file_path.endswith('.txt'):
-            df = pd.read_csv(file_path)
+        Returns:
+        - pd.DataFrame: Loaded raw data.
+        """
+        if file_path.endswith('.psv'):
+            return pd.read_csv(file_path, sep='|')
+        elif file_path.endswith('.csv') or file_path.endswith('.txt'):
+            return pd.read_csv(file_path)
         else:
-            df = pd.read_excel(file_path)
+            # Fallback for Excel formats (.xlsx, .xls)
+            return pd.read_excel(file_path)
+
+    def _process_dataframe(self, df, data_type, time_col, id_col, label_col, value_col, attr_col):
+        """
+        Core transformation engine that pivots or reshapes data into a standardized wide format.
+
+        Parameters:
+        - df (pd.DataFrame): The raw input DataFrame.
+        - data_type (str): Format of input data ('long', 'flattened', or 'wide').
+        - time_col (str): Column name representing the temporal dimension.
+        - id_col (str): Column name for the primary entity identifier.
+        - label_col (str, optional): Column name for the target/label.
+        - value_col (str, optional): The column containing measurements (for 'long' format).
+        - attr_col (str, optional): The column containing attribute names (for 'long' format).
+
+        Returns:
+        - pd.DataFrame: Reshaped wide-format DataFrame.
+        """
+        processed_df = None
 
         if data_type == 'long':
-            # Transform multiple rows of metrics into a single row per ID and timestamp
+            # Pivot long-format data where multiple rows represent different attributes of the same timestamp
             pivot_idx = [id_col, time_col]
             if label_col:
                 pivot_idx.append(label_col)
-            self.wide_df = df.pivot_table(index=pivot_idx, columns=attr_col, values=value_col).reset_index()
+            processed_df = df.pivot_table(index=pivot_idx, columns=attr_col, values=value_col).reset_index()
 
         elif data_type == 'flattened':
-            # 1. Determine ID and Label
-            self.id_col = df.columns[0]
-            self.label_col = df.columns[-1]
-
-            # 2. Obtain intermediate observation pairs (Attr_n, Time_n)
+            # Handle non-standard 'flattened' structures by unrolling interleaved attribute/time pairs
             obs_cols = df.columns[1:-1]
-
-            # 3. Flattened data
             rows = []
             for _, row in df.iterrows():
                 for i in range(0, len(obs_cols), 2):
-                    # Get feature names (from column names, such as "Attr 1"）
-                    attr_name = obs_cols[i]
-                    attr_val = row[obs_cols[i]]
-                    time_val = row[obs_cols[i + 1]]
-
+                    attr_name, attr_val, time_val = obs_cols[i], row[obs_cols[i]], row[obs_cols[i + 1]]
+                    # Filter out incomplete observations
                     if pd.notna(attr_val) and pd.notna(time_val):
                         rows.append({
-                            self.id_col: row[self.id_col],
-                            self.label_col: row[self.label_col],
-                            self.time_col: time_val,
+                            id_col: row[id_col],
+                            label_col: row[label_col],
+                            time_col: time_val,
                             "__attr_name__": attr_name,
                             "__value__": attr_val
                         })
-
-            # 4. Core transformation: Expanding different Attrs into independent feature columns using pivot.
             temp_df = pd.DataFrame(rows)
-            temp_df[self.time_col] = pd.to_datetime(temp_df[self.time_col])
-
-            # Convert to Wide Format: ID + Time + Label + Various Attributes
-            self.wide_df = temp_df.pivot_table(
-                index=[self.id_col, self.time_col, self.label_col], columns="__attr_name__", values="__value__"
-            ).reset_index()
-
-            # Clean up column name hierarchy
-            self.wide_df.columns.name = None
+            # Re-pivot the unrolled rows into a unified wide format
+            processed_df = temp_df.pivot_table(index=[id_col, time_col, label_col], columns="__attr_name__",
+                                               values="__value__").reset_index()
+            processed_df.columns.name = None
         else:
-            self.wide_df = df
-        self.wide_df[time_col] = pd.to_datetime(self.wide_df[time_col])
+            # Assume data is already in wide format
+            processed_df = df
 
-        # Identify feature columns by excluding metadata columns
-        exclude = [self.id_col, self.time_col, self.label_col]
-        self.features = [c for c in self.wide_df.columns if c not in exclude]
+        return processed_df
 
-        # Convert time information into floating-point numbers
-        date_cols = self.wide_df.select_dtypes(include=['datetime64']).columns
+    def read_file(
+        self,
+        file_path,
+        time_col,
+        id_col,
+        label_col=None,
+        value_col=None,
+        attr_col=None,
+        data_type='long',
+        label_type='static',
+        cols_to_remove=None,
+        custom_mapping=None,
+        datetime_cols=None,
+        encode_strings=True
+    ):
+        """
+        Entry point for processing a single data file.
+
+        Parameters:
+        - file_path (str): Path to the source file.
+        - time_col (str): Name of the timestamp column.
+        - id_col (str): Name of the identifier column.
+        - label_col (str, optional): Target column name.
+        - value_col/attr_col (str, optional): Required if data_type is 'long'.
+        - data_type (str): 'long', 'flattened', or 'wide'. Default 'long'.
+        - label_type (str): 'static' (one label per ID) or 'dynamic' (label per timestamp).
+        - cols_to_remove (list, optional): List of column names to drop.
+        - custom_mapping (dict, optional): Dictionary for manual value replacement {col: {old: new}}.
+        - datetime_cols (list, optional): List of additional columns to parse as dates.
+        - encode_strings (bool): Whether to automatically label-encode categorical features.
+        """
+        self.id_col, self.time_col, self.label_col, self.label_type = id_col, time_col, label_col, label_type
+        raw_df = self._load_raw_df(file_path)
+
+        self.wide_df = self._process_dataframe(raw_df, data_type, time_col, id_col, label_col, value_col, attr_col)
+        self._finalize_processing(cols_to_remove, custom_mapping, datetime_cols, encode_strings)
+
+    def read_directory(
+        self,
+        dir_path,
+        time_col,
+        id_col=None,
+        label_col=None,
+        value_col=None,
+        attr_col=None,
+        data_type='wide',
+        label_type='static',
+        cols_to_remove=None,
+        custom_mapping=None,
+        datetime_cols=None,
+        encode_strings=True
+    ):
+        """
+        Batch processing mode for a directory containing multiple entity files.
+
+        Parameters:
+        - dir_path (str): Path to directory.
+        - id_col (str, optional): If None, filenames (minus extension) are used as IDs.
+        - (Other params): Identical to read_file.
+        """
+        self.time_col, self.label_col, self.label_type = time_col, label_col, label_type
+        self.id_col = id_col if id_col else "ID"
+
+        all_dfs = []
+        extensions = ('.csv', '.psv', '.xlsx', '.xls')
+        files = [f for f in os.listdir(dir_path) if f.lower().endswith(extensions) and not f.startswith('.')]
+
+        for file_name in files:
+            file_path = os.path.join(dir_path, file_name)
+            raw_df = self._load_raw_df(file_path)
+
+            # Auto-generate ID from filename if missing in the dataset
+            if self.id_col not in raw_df.columns:
+                raw_df[self.id_col] = os.path.splitext(file_name)[0]
+
+            individual_wide = self._process_dataframe(
+                raw_df, data_type, self.time_col, self.id_col, self.label_col, value_col, attr_col
+            )
+            all_dfs.append(individual_wide)
+
+        # Merge all entities into a single global wide DataFrame
+        self.wide_df = pd.concat(all_dfs, axis=0, ignore_index=True)
+        self._finalize_processing(cols_to_remove, custom_mapping, datetime_cols, encode_strings)
+
+    def _finalize_processing(self, cols_to_remove=None, custom_mapping=None, datetime_cols=None, encode_strings=True):
+        """
+        Unified post-processing pipeline for cleaning, mapping, and encoding the Wide DataFrame.
+        """
+
+        # 1. Feature pruning
+        if cols_to_remove:
+            # Use intersection to avoid KeyErrors during bulk removal
+            to_drop = [c for c in cols_to_remove if c in self.wide_df.columns]
+            self.wide_df.drop(columns=to_drop, inplace=True)
+
+        # 2. Domain-specific value mapping
+        if custom_mapping:
+            for col, mapping_dict in custom_mapping.items():
+                if col in self.wide_df.columns:
+                    self.wide_df[col] = self.wide_df[col].replace(mapping_dict)
+
+        # 3. Temporal normalization
+        # Parse main time column; 'coerce' handles malformed dates by returning NaT
+        self.wide_df[self.time_col] = pd.to_datetime(self.wide_df[self.time_col], errors='coerce')
+
+        if datetime_cols:
+            for col in datetime_cols:
+                if col in self.wide_df.columns and col != self.time_col:
+                    self.wide_df[col] = pd.to_datetime(self.wide_df[col], errors='coerce')
+
+        # Convert secondary datetime columns to Unix epoch (integers) for model compatibility
+        date_cols = self.wide_df.select_dtypes(include=['datetime64', 'datetimetz']).columns
         for col in date_cols:
             if col != self.time_col:
                 self.wide_df[col] = self.wide_df[col].astype(np.int64) // 10**9
 
-        if self.label_col:
-            # Map a single ground truth label to each unique ID
-            self.y = self.wide_df.groupby(self.id_col)[self.label_col].first()
+        # 4. Feature identification
+        exclude = [self.id_col, self.time_col, self.label_col]
+        self.features = [c for c in self.wide_df.columns if c not in exclude]
+
+        # 5. Categorical encoding
+        if encode_strings:
+            string_cols = self.wide_df[self.features].select_dtypes(include=['object', 'string', 'category']).columns
+            for col in string_cols:
+                # factorize performs label encoding; preserves NaNs as -1
+                self.wide_df[col] = pd.factorize(self.wide_df[col])[0]
+
+        # 6. Label extraction (y)
+        if self.label_col and self.label_col in self.wide_df.columns:
+            if self.label_type == 'static':
+                # Map one label per ID (takes the first encountered value)
+                self.y = self.wide_df.groupby(self.id_col)[self.label_col].first()
+            else:
+                # Dynamic labels for each time point
+                self.y = self.wide_df[self.label_col]
 
     def export(self, export_path):
         """
-        Save the processed wide-format DataFrame to Excel.
+        Saves the processed wide DataFrame to an Excel file.
 
         Parameters:
-        - export_path: Path where the output Excel file will be saved.
+        - export_path (str): Destination file path.
         """
         os.makedirs(os.path.dirname(export_path), exist_ok=True)
         self.wide_df.to_excel(export_path, index=False)
 
 
 class TSProcessor(Processor):
+
+    def train_test_split(self, test_size=0.2, shuffle=True, random_state=None, stratify=False, max_len=None):
+        """
+        Splits the processed wide DataFrame into training and testing tensors, handling 
+        sequence alignment and optional stratification.
+
+        Parameters:
+        - test_size (float): Proportion of the dataset to include in the test split.
+        - shuffle (bool): Whether to shuffle the data before splitting.
+        - random_state (int, optional): Seed for reproducible shuffling.
+        - stratify (bool): If True, performs stratified splitting based on self.y.
+        - max_len (int, optional): Maximum sequence length for the output tensors. 
+                                   If None, uses the maximum length found in the data.
+
+        Returns:
+        - X_train (np.ndarray): Training features of shape (n_train, max_len, n_features).
+        - X_test (np.ndarray): Testing features of shape (n_test, max_len, n_features).
+        - y_train (np.ndarray): Training labels (1D for static, 2D for temporal).
+        - y_test (np.ndarray): Testing labels (1D for static, 2D for temporal).
+        """
+        # Ensure temporal consistency before processing
+        df_sorted = self.wide_df.sort_values([self.id_col, self.time_col])
+
+        # Calculate time intervals between successive observations per entity
+        df_sorted['time_delta'] = df_sorted.groupby(self.id_col)[self.time_col].diff().dt.total_seconds().fillna(0)
+
+        current_features = self.features + ['time_delta']
+        self.time_index = len(current_features) - 1
+
+        unique_ids = df_sorted[self.id_col].unique()
+        is_temporal_label = self.label_type == 'temporal'
+
+        # Extract labels for stratification if applicable (only supported for static labels)
+        stratify_labels = self.y.loc[unique_ids].values if (stratify and not is_temporal_label) else None
+
+        # Split at the entity (ID) level to prevent data leakage across time steps
+        from sklearn.model_selection import train_test_split as skl_split
+        train_ids, test_ids = skl_split(
+            unique_ids,
+            test_size=test_size,
+            random_state=random_state if shuffle else None,
+            shuffle=shuffle,
+            stratify=stratify_labels if stratify and shuffle else None
+        )
+
+        # Determine target sequence length for tensor padding/truncation
+        actual_max_steps = df_sorted.groupby(self.id_col).size().max()
+        target_len = max_len if max_len is not None else actual_max_steps
+        n_features = len(current_features)
+
+        def build_tensors(id_list):
+            """
+            Internal helper to project grouped DataFrame rows into 3D NumPy tensors.
+            """
+            X_tensor = np.zeros((len(id_list), target_len, n_features))
+            y_tensor = np.zeros((len(id_list), target_len)) if is_temporal_label else np.zeros((len(id_list),))
+            times_list = []
+
+            # Grouping once to optimize lookup speed
+            grouped = dict(list(df_sorted.groupby(self.id_col)))
+            for i, _id in enumerate(id_list):
+                group_data = grouped[_id]
+                data_values = group_data[current_features].values
+                time_values = group_data[self.time_col].values
+
+                seq_len = len(data_values)
+                fill_len = min(seq_len, target_len)
+
+                # Implementation Detail: Post-alignment/truncation
+                # We take the LAST 'fill_len' steps and place them at the start of the tensor
+                X_tensor[i, :fill_len, :] = data_values[-fill_len:]
+                times_list.append(time_values[-fill_len:])
+
+                if self.label_col:
+                    if is_temporal_label:
+                        y_tensor[i, :fill_len] = group_data[self.label_col].values[-fill_len:]
+                    else:
+                        y_tensor[i] = self.y.loc[_id]
+
+            return X_tensor, y_tensor, times_list
+
+        X_train, y_train, self.train_times = build_tensors(train_ids)
+        X_test, y_test, self.test_times = build_tensors(test_ids)
+
+        return X_train, X_test, y_train, y_test
+
+    def time_resample(self, X_train, X_test, freq='1D', fill_method='linear'):
+        """
+        Resamples temporal features to a fixed frequency (e.g., Daily, Hourly) 
+        and handles missing values via interpolation.
+
+        Parameters:
+        - X_train (np.ndarray): Training feature tensor from train_test_split.
+        - X_test (np.ndarray): Testing feature tensor from train_test_split.
+        - freq (str): Pandas offset alias for the target frequency (e.g., '1H', '1D').
+        - fill_method (str): Interpolation logic ('linear', 'time', 'nearest').
+
+        Returns:
+        - X_train_resampled (np.ndarray): Resampled training features.
+        - X_test_resampled (np.ndarray): Resampled testing features (aligned to training length).
+        """
+
+        def _process_set(X, times_list, target_len=None):
+            """
+            Internal helper to apply resampling logic to individual sequence samples.
+            """
+            resampled_list = []
+            n_samples = X.shape[0]
+            n_features = X.shape[2]
+
+            for i in range(n_samples):
+                # Only process the non-padded portion of the tensor
+                valid_len = len(times_list[i])
+                sample_data = X[i, :valid_len, :]
+
+                # Map back to datetime index for pandas resampling capabilities
+                df = pd.DataFrame(sample_data)
+                df.index = pd.to_datetime(times_list[i])
+
+                # Execute frequency conversion and fill gaps
+                resampled = df.resample(freq).mean()
+                resampled = resampled.interpolate(method=fill_method).ffill().bfill()
+                resampled_list.append(resampled.values)
+
+            # Determine global max length after resampling to ensure tensor uniformity
+            if target_len is None:
+                target_len = max(len(s) for s in resampled_list)
+
+            X_out = np.zeros((n_samples, target_len, n_features))
+            for i, s in enumerate(resampled_list):
+                fill_len = min(len(s), target_len)
+                # Front-alignment padding logic
+                X_out[i, :fill_len, :] = s[:fill_len]
+
+            return X_out, target_len
+
+        # Resample train set first to establish the baseline sequence length
+        X_train_resampled, train_max_len = _process_set(X_train, self.train_times)
+        # Resample test set using the train set length to ensure model input compatibility
+        X_test_resampled, _ = _process_set(X_test, self.test_times, target_len=train_max_len)
+
+        return X_train_resampled, X_test_resampled
 
     def data_cleaning(self, X_train, X_test, fill_missing='mean', outlier_method='iqr'):
         """
@@ -240,36 +514,6 @@ class TSProcessor(Processor):
 
         return X_train, X_test
 
-    def time_resample(self, freq='1D', fill_method='linear'):
-        """
-        Resample time series to a fixed frequency per ID. 
-        Maintains wide-format DataFrame. Sequence lengths may still vary between IDs.
-
-        Parameters:
-        - freq: Resampling frequency (e.g., '1D', 'H').
-        - fill_method: Interpolation method for missing time steps.
-        """
-        if self.wide_df[[self.id_col, self.time_col]].isnull().any().any():
-            raise ValueError("ID or Time column contains NaN; resampling aborted")
-
-        resampled_groups = []
-        unique_ids = self.wide_df[self.id_col].unique()
-
-        for _id in unique_ids:
-            # Filter and set time as index for resampling
-            group = self.wide_df[self.wide_df[self.id_col] == _id].set_index(self.time_col)
-
-            # Resample features and interpolate
-            resampled = group[self.features].resample(freq).mean()
-            resampled = resampled.interpolate(method=fill_method).ffill().bfill()
-
-            # Restore ID column and reset index to keep time_col as a column
-            resampled.insert(0, self.id_col, _id)
-            resampled_groups.append(resampled.reset_index())
-
-        self.wide_df = pd.concat(resampled_groups, ignore_index=True)
-        return self.wide_df
-
     def scale_features(self, X_train, X_test, method='standardize'):
         """
         Scales 3D tensors features while preserving zero-padding.
@@ -312,105 +556,105 @@ class TSProcessor(Processor):
 
         return X_train_scaled, X_test_scaled
 
-    def train_test_split(self, test_size=0.2, shuffle=True, random_state=None, stratify=False):
-        """
-        Splits data into 3D tensors by unique IDs for sequence modeling.
-        
-        Parameters:
-        - test_size (float or int): Fraction or number of IDs for testing.
-        - shuffle (bool): Whether to randomize ID order.
-        - random_state (int): Seed for reproducibility.
-        - stratify (bool): Whether to perform stratified sampling based on labels.
-        - scale_method (str): 'standardize', 'normalize', or None.
-
-        Returns:
-        - X_train, X_test (np.ndarray): Scaled 3D Tensors [Samples, TimeSteps, Features].
-        - y_train, y_test (np.ndarray): Corresponding labels.
-        """
-        # --- 1. Feature Engineering & Sorting ---
-        # Sort by ID and Time to ensure time_delta calculation is chronologically correct
-        df_sorted = self.wide_df.sort_values([self.id_col, self.time_col])
-        # Diff within groups to prevent time gaps leaking between different IDs
-        df_sorted['time_delta'] = df_sorted.groupby(self.id_col)[self.time_col].diff().dt.total_seconds().fillna(0)
-
-        current_features = self.features + ['time_delta']
-        self.time_index = len(current_features) - 1
-
-        # --- 2. ID-based Split & Stratified Sampling ---
-        unique_ids = df_sorted[self.id_col].unique()
-
-        # Extract corresponding labels for unique IDs if stratification is requested
-        stratify_labels = self.y.loc[unique_ids].values if stratify else None
-
-        # Delegate split and stratify logic to sklearn
-        train_ids, test_ids = train_test_split(
-            unique_ids,
-            test_size=test_size,
-            random_state=random_state if shuffle else None,
-            shuffle=shuffle,
-            stratify=stratify_labels if stratify and shuffle else None
-        )
-
-        # --- 3. 3D Tensor Construction (Before Scaling) ---
-        max_steps = df_sorted.groupby(self.id_col).size().max()
-        n_features = len(current_features)
-
-        def build_tensor(id_list):
-            tensor = np.zeros((len(id_list), max_steps, n_features))
-            # Dictionary mapping avoids repeated O(N) filtering in the loop
-            grouped = dict(list(df_sorted.groupby(self.id_col)))
-            for i, _id in enumerate(id_list):
-                group_data = grouped[_id][current_features].values
-                # Zero-padding for sequences shorter than max_steps
-                tensor[i, :len(group_data), :] = group_data
-            return tensor
-
-        X_train, X_test = build_tensor(train_ids), build_tensor(test_ids)
-
-        # --- 4. Label Alignment ---
-        # Ensure label order strictly matches the shuffled X tensor order
-        y_train = self.y.loc[train_ids].values
-        y_test = self.y.loc[test_ids].values
-
-        return X_train, X_test, y_train, y_test
-
 
 class StaticProcessor(Processor):
 
     def extract_features(self, agg_funcs=['mean', 'std', 'max', 'min'], include_duration=False):
         """
-        Aggregate time-series data into static statistical features for each unique ID.
-        Flattens temporal variance into a single row per instance.
+        Transforms time-series data into fixed-length statistical summaries. This reduces 
+        temporal sequences into global descriptors for standard machine learning models.
 
         Parameters:
-        - agg_funcs (list): List of aggregation strings (e.g., 'mean', 'std', 'max', 'min', 'skew').
-        - include_duration (bool): Whether to include the time duration (max - min) as a feature.
+        - agg_funcs (list): List of pandas-compatible aggregation strings to apply to features.
+        - include_duration (bool): If True, calculates the total timespan (max - min) for each ID.
 
         Returns:
-        - wide_df (pd.DataFrame): Aggregated DataFrame with flattened feature columns.
+        - pd.DataFrame: The restructured wide_df containing aggregated features.
         """
-        # Group temporal observations by ID and apply multi-statistic aggregation
+        # 1. Compute global statistical descriptors per entity ID
         agg_df = self.wide_df.groupby(self.id_col)[self.features].agg(agg_funcs)
-
-        # Flatten MultiIndex columns into 'Feature_Function' naming convention
+        # Flatten MultiIndex columns into a single-level naming convention (e.g., 'feature_mean')
         agg_df.columns = [f"{col}_{func}" for col, func in agg_df.columns]
 
-        # Calculate duration if requested (Difference between max and min timestamp)
         if include_duration:
             duration = self.wide_df.groupby(self.id_col)[self.time_col].agg(lambda x: x.max() - x.min())
+            # Convert timedelta objects to raw seconds for numeric processing
             agg_df['duration'] = duration.dt.total_seconds()
 
-        self.features = list(agg_df.columns)
+        new_feature_names = list(agg_df.columns)
 
-        # Synchronize labels by taking the first observation per ID group
-        if self.label_col:
+        # 2. Restructure DataFrame based on the target label architecture
+        if self.label_type == 'dynamic':
+            # Dynamic Mode: Preserves all time points but attaches global entity statistics to each row.
+            # Useful for models that require global context at every local time step.
+            self.wide_df = self.wide_df[[self.id_col, self.time_col,
+                                         self.label_col]].merge(agg_df.reset_index(), on=self.id_col, how='left')
+        else:
+            # Static Mode: Compresses the dataset so each ID occupies exactly one row.
             labels = self.wide_df.groupby(self.id_col)[self.label_col].first()
             self.wide_df = pd.concat([agg_df, labels], axis=1).reset_index()
-            self.y = self.wide_df[self.label_col]
-        else:
-            self.wide_df = agg_df.reset_index()
 
+        # Update metadata to reflect the new feature space
+        self.features = new_feature_names
+        self.y = self.wide_df[self.label_col]
         return self.wide_df
+
+    def train_test_split(self, test_size=0.2, shuffle=True, random_state=None, stratify=False):
+        """
+        Partition features and labels into training and testing sets. Supports standard 
+        tabular splitting and sequence-padding for dynamic label sets.
+
+        Parameters:
+        - test_size (float): The proportion of data to allocate to the test set.
+        - shuffle (bool): Whether to randomize the indices before splitting.
+        - random_state (int, optional): Seed for deterministic shuffling.
+        - stratify (bool): Whether to ensure balanced label distribution (Static mode only).
+
+        Returns:
+        - X_train, X_test (np.ndarray): Feature matrices.
+        - y_train, y_test (np.ndarray): Label vectors or matrices.
+        """
+        # Logic for Static Labels: Standard row-wise splitting
+        if self.label_type == 'static':
+            X = self.wide_df[self.features].values
+            y = self.y.values
+            stratify_param = y if (stratify and shuffle) else None
+            return train_test_split(
+                X, y, test_size=test_size, random_state=random_state, shuffle=shuffle, stratify=stratify_param
+            )
+        else:
+            # Logic for Dynamic Labels: Entity-level splitting to prevent temporal leakage
+            unique_ids = self.wide_df[self.id_col].unique()
+            # Split the unique IDs first; ensures all timepoints for a single ID stay in the same set
+            train_ids, test_ids = train_test_split(unique_ids, test_size=test_size, random_state=random_state, shuffle=shuffle)
+
+            # 1. Construct X: Retrieve the pre-computed static features for each ID
+            # drop_duplicates ensures we only have one row of statistics per entity
+            df_unique = self.wide_df.drop_duplicates(subset=[self.id_col]).set_index(self.id_col)
+            X_train = df_unique.loc[train_ids, self.features].values
+            X_test = df_unique.loc[test_ids, self.features].values
+
+            # 2. Construct y: Extract label sequences and pad to uniform length
+            max_len = self.wide_df.groupby(self.id_col).size().max()
+
+            def build_2d_y(id_list):
+                """
+                Internal utility to convert group-wise labels into a 2D tensor of shape (n_ids, max_len).
+                """
+                y_tensor = np.zeros((len(id_list), max_len))
+                # Dictionary lookup for O(1) group access during iteration
+                grouped = dict(list(self.wide_df.groupby(self.id_col)))
+                for i, _id in enumerate(id_list):
+                    vals = grouped[_id][self.label_col].values
+                    # Sequence Alignment: Post-alignment (takes latest fill_len points)
+                    fill_len = min(len(vals), max_len)
+                    y_tensor[i, :fill_len] = vals[-fill_len:]
+                return y_tensor
+
+            y_train = build_2d_y(train_ids)
+            y_test = build_2d_y(test_ids)
+
+            return X_train, X_test, y_train, y_test
 
     def data_cleaning(self, X_train, X_test, fill_missing='mean', outlier_method='iqr'):
         """
@@ -490,27 +734,6 @@ class StaticProcessor(Processor):
             X_test[mask_test, i] = fill_val
 
         return X_train, X_test
-
-    def train_test_split(self, test_size=0.2, shuffle=True, random_state=None, stratify=False):
-        """
-        Shuffle and partition the static feature matrix into training and testing sets.
-        Converts tabular data into 2D NumPy arrays for model ingestion.
-
-        Parameters:
-        - test_size (float/int): Fraction or absolute number of samples for testing.
-        - shuffle (bool): Whether to randomize sample order.
-        - random_state (int): Seed for reproducibility.
-        - stratify (bool): Whether to use stratified sampling based on labels.
-
-        Returns:
-        - X_train, X_test, y_train, y_test: Partitioned feature matrices and labels.
-        """
-        X = self.wide_df[self.features].values
-        y = self.y.values
-
-        stratify_param = y if (stratify and shuffle) else None
-
-        return train_test_split(X, y, test_size=test_size, random_state=random_state, shuffle=shuffle, stratify=stratify_param)
 
     def scale_features(self, X_train, X_test, method='standard'):
         """
