@@ -20,7 +20,7 @@ pip install mtslearn
 ```
 
 ## 🚀 Quick Start
-Get started in seconds by running our interactive tutorial: 🔗 [test.ipynb](test.ipynb): This notebook demonstrates the complete workflow of static and time series processes using a sample dataset containing 375 patients.
+Get started in seconds by running our interactive tutorial: 🔗 [test.ipynb](test.ipynb): This notebook demonstrates the complete workflow of static and time series processes.
 
 ## Documentation
 
