@@ -1,7 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, precision_recall_fscore_support, roc_auc_score
 from .utils import TransformerClassifier, CoxModel
+import warnings
 
 
 class Temporal_Classifier:
@@ -65,8 +66,10 @@ class Temporal_Classifier:
         # Differentiate between probability outputs and direct class predictions
         if isinstance(y_probs_or_preds, np.ndarray) and y_probs_or_preds.ndim == 3:
             # Shape: (samples, seq_len, num_classes)
+            y_probs = y_probs_or_preds
             y_pred = np.argmax(y_probs_or_preds, axis=-1)
         else:
+            y_probs = None
             y_pred = y_probs_or_preds
 
         # Flatten sequences to compute overall standard classification metrics
@@ -76,11 +79,14 @@ class Temporal_Classifier:
         print(f"\n--- {self.model_type} Temporal Classification Report (flattened) ---")
         print(classification_report(y_test_flat, y_pred_flat, target_names=class_names))
 
-        # Plot 1: Sample-level misclassification rate distribution
-        self._plot_sample_error_distribution(y_test, y_pred)
+        # # Plot 1: Sample-level misclassification rate distribution
+        # self._plot_sample_error_distribution(y_test, y_pred)
 
-        # Plot 2: Time-step-level directional error (requires classes to have ordinal meaning)
-        self._plot_timestep_error_distribution(y_test, y_pred)
+        # # Plot 2: Time-step-level directional error (requires classes to have ordinal meaning)
+        # self._plot_timestep_error_distribution(y_test, y_pred)
+
+        # # Plot 3: Time-step-level AUC, F1, P and R
+        self._plot_metrics_over_time(y_test, y_pred, y_probs=y_probs)
 
     def _plot_loss(self, loss_history):
         """
@@ -161,6 +167,106 @@ class Temporal_Classifier:
         plt.legend()
         plt.show()
 
+    def _plot_metrics_over_time(self, y_true, y_pred, y_probs=None, average='macro'):
+        """
+        Visualizes classification performance stability across sequential time steps.
+
+        This method slices temporal sequence data by time-axis index, computing standard 
+        classification metrics (Precision, Recall, F1, and ROC-AUC) for each discrete 
+        timestamp. It generates a consolidated line plot to diagnose model performance 
+        drift or temporal bias.
+
+        Parameters:
+        -----------
+        y_true : np.ndarray
+            Ground truth labels. Shape: (n_samples, n_timesteps).
+        y_pred : np.ndarray
+            Hard class predictions. Shape: (n_samples, n_timesteps).
+        y_probs : np.ndarray, optional (default=None)
+            Predicted class probabilities. Shape: (n_samples, n_timesteps, n_classes) 
+            for multiclass, or (n_samples, n_timesteps) for binary. Required for AUC.
+        average : str, default='macro'
+            Aggregation strategy for multiclass metrics. Options: 'micro', 'macro', 
+            'samples', 'weighted'.
+
+        Returns:
+        --------
+        None
+            The method renders a Matplotlib figure directly.
+        """
+        seq_len = y_true.shape[1]
+
+        # Metric accumulators for temporal axis plotting
+        precisions, recalls, f1s, aucs = [], [], [], []
+
+        for t in range(seq_len):
+            # Isolate cross-sectional slice for current time step 't'
+            y_t_true = y_true[:, t]
+            y_t_pred = y_pred[:, t]
+
+            # Compute PRF1 metrics; zero_division=0 prevents runtime crashes
+            # if a time step contains no instances of a specific class
+            p, r, f1, _ = precision_recall_fscore_support(y_t_true, y_t_pred, average=average, zero_division=0)
+            precisions.append(p)
+            recalls.append(r)
+            f1s.append(f1)
+
+            if y_probs is not None:
+                y_t_probs = y_probs[:, t]
+                try:
+                    if self.num_classes > 2:
+                        # Standard One-vs-Rest (OvR) strategy for multiclass AUC
+                        auc = roc_auc_score(y_t_true, y_t_probs, multi_class='ovr', average=average)
+                    else:
+                        # Extract positive class probabilities (column 1) for binary cases
+                        if y_t_probs.ndim > 1 and y_t_probs.shape[1] == 2:
+                            prob_for_auc = y_t_probs[:, 1]
+                        else:
+                            prob_for_auc = y_t_probs
+                        auc = roc_auc_score(y_t_true, prob_for_auc)
+                    aucs.append(auc)
+                except ValueError:
+                    # Occurs if y_t_true contains only one unique class at this time step
+                    aucs.append(np.nan)
+            else:
+                aucs.append(np.nan)
+
+        # Plotting Configuration
+        plt.figure(figsize=(10, 6))
+        time_steps = np.arange(seq_len)
+
+        # Rendering PRF1 curves with distinct markers and line styles
+        plt.plot(time_steps, f1s, label=f'F1-score ({average})', color='tab:green', marker='s', linestyle='-', alpha=0.7)
+        plt.plot(time_steps, precisions, label=f'Precision ({average})', color='tab:blue', marker='^', linestyle='-.', alpha=0.7)
+        plt.plot(time_steps, recalls, label=f'Recall ({average})', color='tab:orange', marker='v', linestyle='--', alpha=0.7)
+
+        if y_probs is not None and not np.all(np.isnan(aucs)):
+            # Filter NaN values to allow continuous line plotting for valid AUC segments
+            valid_idx = ~np.isnan(aucs)
+            plt.plot(
+                time_steps[valid_idx],
+                np.array(aucs)[valid_idx],
+                label=f'ROC-AUC ({average})',
+                color='tab:red',
+                marker='o',
+                linestyle=':',
+                alpha=0.7
+            )
+
+            if not np.all(valid_idx):
+                warnings.warn("Certain time steps with single-class ground truth were omitted from AUC plotting.")
+
+        # Chart aesthetics and axis normalization
+        plt.title('Performance Metrics Over Time Steps', fontsize=14)
+        plt.xlabel('Time Step', fontsize=12)
+        plt.ylabel('Score (0.0 - 1.0)', fontsize=12)
+        plt.ylim(-0.05, 1.05)
+        plt.grid(True, alpha=0.6)
+
+        plt.legend(loc='lower right')
+        plt.tight_layout()
+        plt.show()
+
 
 class Temporal_Temporal_Classifier(Temporal_Classifier):
     """
@@ -181,6 +287,7 @@ class Temporal_Temporal_Classifier(Temporal_Classifier):
         }
 
         self.DEFAULT_CONFIGS = {'Transformer': {'d_model': 64, 'nhead': 4, 'epochs': 20, 'batch_size': 32, 'lr': 0.001}}
+
 
 class Static_Temporal_Classifier(Temporal_Classifier):
     """
@@ -203,9 +310,4 @@ class Static_Temporal_Classifier(Temporal_Classifier):
         }
 
         # Default configurations for integrated models
-        self.DEFAULT_CONFIGS = {
-            'CoxPH': {
-                'penalizer': 0.1,
-                'l1_ratio': 0.0
-            }
-        }
+        self.DEFAULT_CONFIGS = {'CoxPH': {'penalizer': 0.1, 'l1_ratio': 0.0}}
