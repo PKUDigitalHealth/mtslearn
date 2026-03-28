@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mtslearn"
-version = "0.1.0"
+version = "0.1.1"
 description = "The Medical Time-Series Analysis Toolkit mtslearn is designed to process and analyze complex, irregularly sampled medical data."
 readme = "README.md"
 requires-python = "~=3.12"
