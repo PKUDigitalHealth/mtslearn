@@ -27,8 +27,10 @@ dependencies = [
 "Homepage" = "https://github.com/PKUDigitalHealth/mtslearn"
 
 [tool.hatch.build.targets.sdist]
-include = ["/mtslearn"]
+include = ["mtslearn"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["mtslearn"]
-artifacts = ["*.psv","*.xlsx","*.html"]
+
+[tool.hatch.build]
+artifacts = ["mtslearn/**/*"]

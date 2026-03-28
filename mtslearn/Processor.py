@@ -245,7 +245,7 @@ class Processor:
         BASE_DIR = os.path.dirname(os.path.abspath(__file__))
         if name == "sepsis-A":
             data_config = {
-                "dir_path": BASE_DIR + '../data/sepsis_data/set_A/',
+                "dir_path": BASE_DIR + '/data/sepsis_data/set_A/',
                 "data_type": 'wide',
                 "time_col": 'ICULOS',
                 "label_col": 'SepsisLabel',
@@ -254,7 +254,7 @@ class Processor:
             self.read_directory(**data_config)
         elif name == "sepsis-B":
             data_config = {
-                "dir_path": BASE_DIR + '../data/sepsis_data/set_B/',
+                "dir_path": BASE_DIR + '/data/sepsis_data/set_B/',
                 "data_type": 'wide',
                 "time_col": 'ICULOS',
                 "label_col": 'SepsisLabel',
@@ -263,7 +263,7 @@ class Processor:
             self.read_directory(**data_config)
         elif name == "COVID-19":
             data_config = {
-                "file_path": BASE_DIR + '../data/covid19_data/375_patients_example.xlsx',
+                "file_path": BASE_DIR + '/data/covid19_data/375_patients_example.xlsx',
                 "data_type": 'wide',
                 "time_col": 'RE_DATE',
                 "id_col": 'PATIENT_ID',
