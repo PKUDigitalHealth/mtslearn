@@ -241,6 +241,36 @@ class Processor:
         os.makedirs(os.path.dirname(export_path), exist_ok=True)
         self.wide_df.to_excel(export_path, index=False)
 
+    def load_dataset(self, name):
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        if name == "sepsis-A":
+            data_config = {
+                "dir_path": BASE_DIR + '../data/sepsis_data/set_A/',
+                "data_type": 'wide',
+                "time_col": 'ICULOS',
+                "label_col": 'SepsisLabel',
+                "label_type": 'temporal'
+            }
+            self.read_directory(**data_config)
+        elif name == "sepsis-B":
+            data_config = {
+                "dir_path": BASE_DIR + '../data/sepsis_data/set_B/',
+                "data_type": 'wide',
+                "time_col": 'ICULOS',
+                "label_col": 'SepsisLabel',
+                "label_type": 'temporal'
+            }
+            self.read_directory(**data_config)
+        elif name == "COVID-19":
+            data_config = {
+                "file_path": BASE_DIR + '../data/covid19_data/375_patients_example.xlsx',
+                "data_type": 'wide',
+                "time_col": 'RE_DATE',
+                "id_col": 'PATIENT_ID',
+                "label_col": 'outcome',
+            }
+            self.read_file(**data_config)
+
 
 class TSProcessor(Processor):
 

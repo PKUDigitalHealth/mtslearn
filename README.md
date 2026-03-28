@@ -20,7 +20,36 @@ pip install mtslearn
 ```
 
 ## 🚀 Quick Start
-Get started in seconds by running our interactive tutorial: 🔗 [test.ipynb](test.ipynb): This notebook demonstrates the complete workflow of static and time series processes.
+
+1. Data Loading & Feature Engineering
+```python
+from mtslearn import StaticProcessor, Static_Static_Classifier
+
+static_processor = StaticProcessor()
+static_processor.load_dataset("COVID-19")  # Built-in dataset
+static_processor.extract_features(agg_funcs=['mean', 'std', 'max', 'min', 'median'], include_duration=True)
+```
+
+2. Data Preprocessing & Cleaning
+```python
+X_train_static, X_test_static, y_train_static, y_test_static = static_processor.train_test_split(
+    test_size=0.3, shuffle=True, random_state=42, stratify=True
+) # data Splitting
+X_train_static, X_test_static = static_processor.data_cleaning(
+    X_train_static, X_test_static, fill_missing='mean', outlier_method='iqr'
+) # data cleaning
+# standardization
+X_train_static, X_test_static = static_processor.scale_features(X_train_static, X_test_static, method='standardize')
+```
+
+3. Model Training & Evaluation
+```python
+model = Static_Static_Classifier(model_type='XGB') 
+model.fit(X_train_static, y_train_static)
+model.evaluate(X_test_static, y_test_static)
+```
+
+For more in-depth examples, refer to 🔗 [test.ipynb](test.ipynb), which demonstrates the complete workflow for both static and time-series processes.
 
 ## Documentation
 
